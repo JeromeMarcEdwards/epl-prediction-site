@@ -1,7 +1,7 @@
 import marimo
 
-__generated_with = "0.10.0"
-app = marimo.App(width="full", title="⚽ EPL Prediction Challenge")
+__generated_with = "0.20.1"
+app = marimo.App(width="full")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
