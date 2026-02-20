@@ -1,1 +1,3 @@
-marimo
+marimo==0.20.1
+requests
+matplotlib
