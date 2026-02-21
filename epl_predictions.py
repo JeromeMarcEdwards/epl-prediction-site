@@ -30,6 +30,16 @@ def _():
         "Alex":   ["Liverpool FC", "Arsenal FC", "Manchester City FC",
                    "Chelsea FC", "Aston Villa FC", "Tottenham Hotspur FC"],
     }
+    
+    # 2024 season predictions
+    PREDICTIONS_2024 = {
+        "Jerome": ["Manchester City FC", "Arsenal FC", "Tottenham Hotspur FC", 
+                   "Chelsea FC", "Liverpool FC", "Manchester United FC"],
+        "Alex":   ["Arsenal FC", "Manchester City FC", "Liverpool FC", 
+                   "Tottenham Hotspur FC", "Aston Villa FC", "Manchester United FC"],
+        "Erin":   ["Manchester City FC", "Arsenal FC", "Tottenham Hotspur FC", 
+                   "Liverpool FC", "Chelsea FC", "Newcastle United FC"],
+    }
     COLORS = {"Jerome": "#E8A838", "Erin": "#4FC3C3", "Alex": "#E8608A"}
     T6_BON = -2
     EX_BON = -5
@@ -40,7 +50,7 @@ def _():
 
     return (
         API_KEY, BASE, BG, CARD, COLORS, EX_BON, HEADERS, MUTED,
-        PREDICTIONS, SEASON, T6_BON, TEXT,
+        PREDICTIONS, PREDICTIONS_2024, SEASON, T6_BON, TEXT,
         base64, datetime, defaultdict, io, matplotlib, mo,
         mpatches, pe, plt, requests,
     )
@@ -252,6 +262,123 @@ def _(BASE, COLORS, EX_BON, HEADERS, PREDICTIONS, SEASON, T6_BON,
         actual_pos, best_md, current_matchday, current_table, errors,
         fetched_at, gw_scores, historical, ranked, recent, results,
         top_scorers, upcoming,
+    )
+
+
+@app.cell(hide_code=True)
+def _(BASE, COLORS, EX_BON, HEADERS, PREDICTIONS_2024, T6_BON,
+      datetime, defaultdict, requests):
+    errors_2024 = []
+
+    def _api_2024(path, params=None):
+        try:
+            r = requests.get(f"{BASE}{path}", headers=HEADERS, params=params, timeout=15)
+            if r.status_code == 200:
+                return r.json()
+            errors_2024.append(f"{path} → HTTP {r.status_code}")
+        except Exception as e:
+            errors_2024.append(f"{path} → {e}")
+        return {}
+
+    def _fuzzy_2024(team, pos_dict):
+        if team in pos_dict:
+            return pos_dict[team]
+        tl = team.lower().replace(" fc", "").strip()
+        for k, v in pos_dict.items():
+            kl = k.lower().replace(" fc", "").strip()
+            if tl in kl or kl in tl:
+                return v
+            if len(set(tl.split()) & set(kl.split())) >= 2:
+                return v
+        return None
+
+    def _score_2024(picks, pos_dict):
+        top6 = {t for t, p in pos_dict.items() if p <= 6}
+        dt = tb = eb = 0
+        bk = []
+        for pr, team in enumerate(picks, 1):
+            ar = _fuzzy_2024(team, pos_dict)
+            if ar is None:
+                bk.append({"team": team, "pred": pr, "actual": "?", "dist": 0, "in_top6": False, "exact": False})
+                continue
+            dist  = abs(pr - ar)
+            in_t6 = any(team.lower().replace(" fc","") in t.lower() or t.lower() in team.lower() for t in top6)
+            exact = (pr == ar)
+            dt += dist
+            if in_t6: tb += T6_BON
+            if exact: eb += EX_BON
+            bk.append({"team": team, "pred": pr, "actual": ar, "dist": dist, "in_top6": in_t6, "exact": exact})
+        return {"dist": dt, "top6": tb, "exact": eb, "total": dt + tb + eb, "breakdown": bk}
+
+    # 1. 2024 standings
+    standings_data_2024 = _api_2024("/competitions/PL/standings", {"season": 2024})
+    current_table_2024 = []
+    for _s in standings_data_2024.get("standings", []):
+        if _s.get("type") == "TOTAL":
+            for _t in _s["table"]:
+                current_table_2024.append({
+                    "pos": _t["position"], "name": _t["team"]["name"],
+                    "pts": _t["points"], "gd": _t["goalDifference"],
+                    "gf": _t["goalsFor"], "ga": _t["goalsAgainst"],
+                    "played": _t["playedGames"], "won": _t["won"],
+                    "draw": _t["draw"], "lost": _t["lost"],
+                    "form": _t.get("form") or "",
+                })
+            break
+
+    actual_pos_2024 = {t["name"]: t["pos"] for t in current_table_2024}
+    current_matchday_2024 = standings_data_2024.get("season", {}).get("currentMatchday", "?")
+
+    # 2. 2024 matches for historical data
+    matches_data_2024 = _api_2024("/competitions/PL/matches", {"season": 2024})
+    all_matches_2024  = matches_data_2024.get("matches", [])
+
+    gw_matches_2024 = defaultdict(list)
+    for _m in all_matches_2024:
+        if _m.get("status") == "FINISHED" and _m.get("matchday"):
+            gw_matches_2024[_m["matchday"]].append(_m)
+
+    _stats_2024 = {}
+    historical_2024 = []
+
+    def _init_2024(n):
+        if n not in _stats_2024:
+            _stats_2024[n] = {"pts": 0, "gf": 0, "ga": 0}
+
+    for _md in sorted(gw_matches_2024.keys()):
+        for _m in gw_matches_2024[_md]:
+            _ht = _m["homeTeam"]["name"]
+            _at = _m["awayTeam"]["name"]
+            _hg = _m["score"]["fullTime"].get("home")
+            _ag = _m["score"]["fullTime"].get("away")
+            if _hg is None or _ag is None:
+                continue
+            _init_2024(_ht); _init_2024(_at)
+            _stats_2024[_ht]["gf"] += _hg; _stats_2024[_ht]["ga"] += _ag
+            _stats_2024[_at]["gf"] += _ag; _stats_2024[_at]["ga"] += _hg
+            if   _hg > _ag: _stats_2024[_ht]["pts"] += 3
+            elif _ag > _hg: _stats_2024[_at]["pts"] += 3
+            else:           _stats_2024[_ht]["pts"] += 1; _stats_2024[_at]["pts"] += 1
+        _sorted = sorted(_stats_2024.items(), key=lambda x: (-x[1]["pts"], -(x[1]["gf"]-x[1]["ga"]), -x[1]["gf"]))
+        historical_2024.append((_md, {n: i+1 for i, (n, _) in enumerate(_sorted)}))
+
+    # 3. 2024 scores
+    results_2024   = {p: _score_2024(picks, actual_pos_2024) for p, picks in PREDICTIONS_2024.items()}
+    ranked_2024    = sorted(results_2024.items(), key=lambda x: x[1]["total"])
+    gw_scores_2024 = {p: [(md, _score_2024(picks, pos)["total"]) for md, pos in historical_2024]
+                     for p, picks in PREDICTIONS_2024.items()}
+
+    best_md_2024 = {}
+    for _p, _pts in gw_scores_2024.items():
+        if len(_pts) >= 2:
+            _deltas = [(w, s - _pts[i-1][1]) for i, (w, s) in enumerate(_pts) if i > 0]
+            best_md_2024[_p] = min(_deltas, key=lambda x: x[1])
+
+    fetched_at_2024 = datetime.now().strftime("%d %b %Y · %H:%M")
+
+    return (
+        actual_pos_2024, best_md_2024, current_matchday_2024, current_table_2024, errors_2024,
+        fetched_at_2024, gw_scores_2024, historical_2024, ranked_2024, results_2024,
     )
 
 
@@ -703,6 +830,125 @@ def _(mo):
       </div>
     </details>
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(COLORS, PREDICTIONS_2024, current_matchday_2024, current_table_2024, errors_2024,
+      fetched_at_2024, mo, ranked_2024, results_2024):
+    _err = f" · ⚠️ {'; '.join(errors_2024)}" if errors_2024 else ""
+    _gws = f"Matchday {current_matchday_2024}" if current_matchday_2024 != "?" else "Final"
+    _all_predicted_2024 = {t.lower().replace(" fc","").strip()
+                          for picks in PREDICTIONS_2024.values() for t in picks}
+    
+    _medals = ["🥇", "🥈", "🥉"]
+
+    def _lb_row_2024(i, p):
+        s = results_2024[p]; c = COLORS[p]
+        return f"""
+        <div class="lb-row" style="border-color:{c}55">
+          <span class="lb-medal">{_medals[i]}</span>
+          <span class="lb-name" style="color:{c}">{p}</span>
+          <span class="lb-detail">
+            <span>📏 dist: <b>+{s['dist']}</b></span>
+            <span>✅ top-6: <b>{s['top6']}</b></span>
+            <span>🎯 exact: <b>{s['exact']}</b></span>
+          </span>
+          <span class="lb-pts" style="color:{c}">{s['total']}</span>
+        </div>"""
+
+    mo.Html(f"""
+    <details>
+      <summary>🏆 2024/25 Season Results</summary>
+      <div style="margin-top:16px">
+        <div class="statusbar">
+          <span>Final Season · {fetched_at_2024}{_err}</span>
+          <span>{len(current_table_2024)} clubs &nbsp;·&nbsp; {_gws}</span>
+        </div>
+        <div class="card" style="margin-top:12px">
+          <div class="section-title">🏆 Leaderboard — 2024/25 Season</div>
+          {"".join(_lb_row_2024(i, p) for i, (p, _) in enumerate(ranked_2024))}
+        </div>
+      </div>
+    </details>
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(BG, CARD, COLORS, MUTED, TEXT, base64, gw_scores_2024, historical_2024, io, mo, pe, plt):
+    _fig, _ax = plt.subplots(figsize=(12, 4), facecolor=BG)
+    _ax.set_facecolor(CARD)
+    for _sp in _ax.spines.values():
+        _sp.set_edgecolor("#30363D")
+
+    if historical_2024:
+        _all_s = [s for pts in gw_scores_2024.values() for _, s in pts]
+        _ymax  = max(_all_s) + 1
+        for _p, _pts in gw_scores_2024.items():
+            _w = [w for w, _ in _pts]
+            _s = [s for _, s in _pts]
+            _c = COLORS[_p]
+            _ax.fill_between(_w, _s, _ymax + 2, alpha=0.07, color=_c, zorder=1)
+            _ax.plot(_w, _s, color=_c, lw=2.5, zorder=3, solid_capstyle="round",
+                     marker="o", markersize=4, markerfacecolor=_c, markeredgewidth=0)
+            _ax.plot(_w[-1], _s[-1], "o", ms=10, color=_c, zorder=5,
+                     markeredgecolor=BG, markeredgewidth=2)
+            _ax.text(_w[-1]+0.25, _s[-1], f" {_p}  {_s[-1]}", color=_c,
+                     fontsize=9, fontfamily="monospace", va="center", fontweight="bold",
+                     path_effects=[pe.withStroke(linewidth=2.5, foreground=BG)])
+        _gws = [w for w, _ in historical_2024]
+        _ax.set_xlim(min(_gws)-0.5, max(_gws)+4)
+        _ax.invert_yaxis()
+        _ax.set_xlabel("Matchday", color=MUTED, fontsize=9, fontfamily="monospace")
+        _ax.set_ylabel("Score  (↑ = better)", color=MUTED, fontsize=9, fontfamily="monospace")
+        _ax.text(0.01, 0.03, "↑ better", transform=_ax.transAxes, color=MUTED, fontsize=8, fontfamily="monospace")
+    else:
+        _ax.text(0.5, 0.5, "No finished matches yet this season",
+                 ha="center", va="center", color=MUTED, fontsize=11, transform=_ax.transAxes)
+
+    _ax.set_title("Prediction Score Evolution by Matchday — 2024/25", color=TEXT, fontsize=11, fontfamily="monospace", pad=12)
+    _ax.tick_params(colors=MUTED)
+    _ax.grid(color="#30363D", lw=0.6, linestyle="--", alpha=0.6, zorder=0)
+    _fig.tight_layout(pad=1.5)
+    _buf = io.BytesIO()
+    _fig.savefig(_buf, format="png", dpi=150, bbox_inches="tight", facecolor=BG)
+    plt.close(_fig); _buf.seek(0)
+    _b64 = base64.b64encode(_buf.read()).decode()
+    mo.Html(f'<details><summary>📈 2024/25 Score Evolution</summary><div style="margin-top:16px"><div class="card"><img class="chart-img" src="data:image/png;base64,{_b64}" /></div></div></details>')
+    return
+
+
+@app.cell(hide_code=True)
+def _(COLORS, PREDICTIONS_2024, mo, ranked_2024, results_2024):
+    _m2 = ["🥇", "🥈", "🥉"]
+
+    def _rc(b): return "exact" if b["exact"] else ("top6" if b["in_top6"] else "")
+    def _dc(b):
+        if b["exact"]: return "d-good"
+        return "d-bad" if b["dist"] > 3 else ("d-ok" if b["dist"] > 0 else "d-good")
+
+    def _pick_card_2024(i, p):
+        c = COLORS[p]; s = results_2024[p]
+        rows = ""
+        for b in s["breakdown"]:
+            short = b["team"].replace(" FC","").replace(" United","").replace(" City"," C.").replace(" Hotspur","")
+            rows += (f'<tr class="{_rc(b)}"><td style="color:#8B949E">{b["pred"]}</td>'
+                     f'<td>{short}</td><td style="text-align:center">{b["actual"]}</td>'
+                     f'<td style="text-align:center" class="{_dc(b)}">{b["dist"]}</td></tr>')
+        legend = ('<tr><td colspan="4" style="padding-top:10px;font-size:0.7rem;color:#8B949E">'
+                  '<span style="background:#1a2e1a;padding:2px 8px;border-radius:4px;color:#FFD700;margin-right:8px">🎯 exact (−5)</span>'
+                  '<span style="background:#14232b;padding:2px 8px;border-radius:4px;color:#4FC3C3">✅ top-6 (−2)</span></td></tr>')
+        return (f'<div class="card" style="border-color:{c}44">'
+                f'<div class="section-title" style="color:{c}">{_m2[i]} {p} &nbsp;·&nbsp;'
+                f'<span style="color:#E6EDF3;font-size:0.85rem">{s["total"]} pts</span></div>'
+                f'<table class="ptable"><thead><tr><th>#</th><th>Predicted</th>'
+                f'<th style="text-align:center">Actual</th><th style="text-align:center">Δ</th>'
+                f'</tr></thead><tbody>{rows}{legend}</tbody></table></div>')
+
+    mo.Html('<details><summary>📋 2024/25 Pick-by-pick Breakdown</summary><div style="margin-top:16px"><div class="section-title">📋 Pick-by-pick Breakdown</div>'
+            '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:18px">'
+            + "".join(_pick_card_2024(i, p) for i, (p, _) in enumerate(ranked_2024)) + '</div></div></details>')
     return
 
 
