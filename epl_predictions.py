@@ -1321,139 +1321,244 @@ def _(
     return
 
 
-# ─── Multi-season SSM data fetch (2020–2024) ─────────────────────────────────
-# Fetches 5 completed seasons and runs the SSM filter on each to build a
-# time-series of end-of-season attack α and defence δ per team.
+# ─── Multi-season SSM: paper-faithful implementation ─────────────────────────
+# Based on Ridall, Titman & Pettitt (2024) JRSS-C.
+# Key improvements vs old approach:
+#   1. Data from football-data.co.uk (free CSVs, no API rate limits, all seasons)
+#   2. Cross-season state carry-over with a *between-season* forgetting factor φ_B
+#      distinct from the within-season φ_W — faithful to the paper's SSM structure
+#   3. Proper identifiability: defence anchored relative to a reference team
+#   4. All 6 seasons (2019/20 → 2024/25) run as one continuous filter, so the
+#      posterior at end of each season seeds the next — no isolated per-season resets
+#   5. End-of-season snapshots used as the time-series for projection
 @app.cell(hide_code=True)
-def _(BASE, HEADERS, np, requests, time):
-    """Fetch seasons 2020-2024, run SSM on each, return per-team strength history."""
+def _(np, requests, time):
+    # ── Parameters (Ridall, Titman & Pettitt 2024) ───────────────────
+    # Within-season forgetting: applied after every match
+    _PHI_W  = 0.975
+    # Between-season forgetting: applied once at the season boundary.
+    # Paper uses distinct φ_W and φ_B; φ_B < φ_W to allow more drift across summers.
+    _PHI_B  = 0.85
+    # Home goal advantage (log scale): λ_H = (α_h / δ_a) * exp(η)
+    _ETA    = 0.26
+    # Gamma prior hyper-parameters for new/unseen teams
+    _A0     = 4.0
+    _B0     = 4.0
+    # Seasons to fetch from football-data.co.uk (free, no rate limits)
+    # Format: season start year → CSV filename suffix used by that site
+    _SEASONS = [
+        (2019, "E0_1920"),
+        (2020, "E0_2021"),
+        (2021, "E0_2122"),
+        (2022, "E0_2223"),
+        (2023, "E0_2324"),
+        (2024, "E0_2425"),
+    ]
+    _CSV_BASE = "https://www.football-data.co.uk/mmz4281"
 
-    _PRIOR_SHAPE = 4.0
-    _PRIOR_RATE  = 4.0
-    _PHI         = 0.975
-    _ETA         = 0.26
-    _HIST_SEASONS = [2020, 2021, 2022, 2023, 2024]
+    # ── Name normaliser: maps football-data.co.uk short names → canonical ──
+    _NAME_MAP = {
+        "Man City":        "Manchester City FC",
+        "Man United":      "Manchester United FC",
+        "Tottenham":       "Tottenham Hotspur FC",
+        "Wolves":          "Wolverhampton Wanderers FC",
+        "Sheffield United":"Sheffield United FC",
+        "Sheff United":    "Sheffield United FC",
+        "Sheffield Utd":   "Sheffield United FC",
+        "Nott'm Forest":   "Nottingham Forest FC",
+        "Nottm Forest":    "Nottingham Forest FC",
+        "Luton":           "Luton Town FC",
+        "Brighton":        "Brighton & Hove Albion FC",
+        "Leicester":       "Leicester City FC",
+        "West Brom":       "West Bromwich Albion FC",
+        "West Ham":        "West Ham United FC",
+        "Newcastle":       "Newcastle United FC",
+        "Norwich":         "Norwich City FC",
+        "Watford":         "Watford FC",
+        "Burnley":         "Burnley FC",
+        "Brentford":       "Brentford FC",
+        "Fulham":          "Fulham FC",
+        "Crystal Palace":  "Crystal Palace FC",
+        "Everton":         "Everton FC",
+        "Southampton":     "Southampton FC",
+        "Arsenal":         "Arsenal FC",
+        "Chelsea":         "Chelsea FC",
+        "Liverpool":       "Liverpool FC",
+        "Leeds":           "Leeds United FC",
+        "Aston Villa":     "Aston Villa FC",
+        "Bournemouth":     "AFC Bournemouth",
+        "Ipswich":         "Ipswich Town FC",
+    }
 
-    def _api_hist(path, params=None):
-        for _att in range(3):
-            try:
-                _r = requests.get(f"{BASE}{path}", headers=HEADERS, params=params, timeout=15)
-                if _r.status_code == 200:
-                    return _r.json()
-                if _r.status_code == 429:
-                    time.sleep(8)
-                    continue
-            except Exception:
-                pass
-        return {}
+    def _norm(name):
+        return _NAME_MAP.get(name, name)
 
-    def _run_ssm_on_season(matches_list):
-        """Run Gamma-Poisson SSM on a completed season's matches.
-        Returns dict: team_name -> {"atk": float, "def": float, "net": float}
-        """
-        # collect teams
-        _teams = sorted({
-            _tn
-            for _m in matches_list
-            if _m.get("status") == "FINISHED"
-            for _tn in (_m["homeTeam"]["name"], _m["awayTeam"]["name"])
-        })
-        if not _teams:
-            return {}
-        _n  = len(_teams)
-        _ix = {_t: _i for _i, _t in enumerate(_teams)}
-        _a  = np.full(_n, _PRIOR_SHAPE)
-        _b  = np.full(_n, _PRIOR_RATE)
-        _c  = np.full(_n, _PRIOR_SHAPE)
-        _d  = np.full(_n, _PRIOR_RATE)
+    def _fetch_csv(suffix):
+        """Fetch a season CSV from football-data.co.uk.
+        Returns list of dicts {home, away, hg, ag, date} for finished matches."""
+        _yr  = suffix[-4:-2]  # e.g. "19" from "E0_1920"
+        _yr2 = suffix[-2:]    # e.g. "20"
+        _url = f"{_CSV_BASE}/{_yr}{_yr2}/E0.csv"
+        try:
+            _r = requests.get(_url, timeout=15)
+            if _r.status_code != 200:
+                return []
+            _rows = []
+            _lines = _r.text.strip().splitlines()
+            if not _lines:
+                return []
+            _headers = [h.strip() for h in _lines[0].split(",")]
+            def _col(row_parts, *names):
+                for _n in names:
+                    if _n in _headers:
+                        try: return row_parts[_headers.index(_n)].strip()
+                        except Exception: pass
+                return ""
+            for _line in _lines[1:]:
+                _p = _line.split(",")
+                if len(_p) < 6: continue
+                _ht = _col(_p, "HomeTeam")
+                _at = _col(_p, "AwayTeam")
+                _hg = _col(_p, "FTHG", "HG")
+                _ag = _col(_p, "FTAG", "AG")
+                _dt = _col(_p, "Date")
+                if _ht and _at and _hg.isdigit() and _ag.isdigit():
+                    _rows.append({"home": _norm(_ht), "away": _norm(_at),
+                                  "hg": int(_hg), "ag": int(_ag), "date": _dt})
+            return _rows
+        except Exception:
+            return []
 
-        def _inv_mean(_ci, _di):
-            return _di / (_ci - 1) if _ci > 1 else _di / _ci
+    # ── Continuous cross-season SSM ───────────────────────────────────
+    # State: for each team, Gamma posteriors (a, b) for attack and (c, d) for defence.
+    # All state stored in dicts keyed by canonical team name so teams entering/leaving
+    # the PL are handled gracefully. New entrants get the shared prior.
 
-        _sorted_m = sorted(
-            [_m for _m in matches_list if _m.get("status") == "FINISHED"],
-            key=lambda _m: _m.get("utcDate", "")
-        )
-        for _m in _sorted_m:
-            _hn = _m["homeTeam"]["name"]
-            _an = _m["awayTeam"]["name"]
-            _hg = _m["score"]["fullTime"].get("home")
-            _ag = _m["score"]["fullTime"].get("away")
-            if _hn not in _ix or _an not in _ix or _hg is None or _ag is None:
-                continue
-            _hi = _ix[_hn]; _ai = _ix[_an]
-            _CH = _inv_mean(_c[_ai], _d[_ai]) * np.exp(_ETA)
-            _CA = _inv_mean(_c[_hi], _d[_hi])
-            _DA = (_a[_hi] / _b[_hi]) * np.exp(_ETA)
-            _DH = (_a[_ai] / _b[_ai]) / np.exp(_ETA)
-            _a[_hi] += int(_hg); _b[_hi] += _CH
-            _a[_ai] += int(_ag); _b[_ai] += _CA
-            _c[_hi] += int(_ag); _d[_hi] += _DA
-            _c[_ai] += int(_hg); _d[_ai] += _DH
-            for _fi in [_hi, _ai]:
-                _a[_fi] *= _PHI; _b[_fi] *= _PHI
-                _c[_fi] *= _PHI; _d[_fi] *= _PHI
+    _a_state: dict = {}   # attack shape
+    _b_state: dict = {}   # attack rate
+    _c_state: dict = {}   # defence shape
+    _d_state: dict = {}   # defence rate
 
+    def _ensure(tm):
+        if tm not in _a_state:
+            _a_state[tm] = _A0; _b_state[tm] = _B0
+            _c_state[tm] = _A0; _d_state[tm] = _B0
+
+    def _atk_mean(tm):
+        return _a_state[tm] / _b_state[tm]
+
+    def _def_mean(tm):
+        _ci, _di = _c_state[tm], _d_state[tm]
+        # Use E[1/X] ≈ d/(c-1) for c>1 (mean of inverse-Gamma), else d/c
+        return _di / (_ci - 1) if _ci > 1 else _di / _ci
+
+    def _update(home, away, hg, ag):
+        """Single match update — MFA closed-form as per paper eq (2.7)."""
+        _ensure(home); _ensure(away)
+        # Expected defensive rate for each side (used as Poisson rate denominator)
+        _dH = _def_mean(home)   # home's defence weakness (away team attacks into)
+        _dA = _def_mean(away)   # away's defence weakness (home team attacks into)
+        # Expected goal rates (Poisson means):
+        #   λ_H = atk_home / def_away * exp(η)
+        #   λ_A = atk_away / def_home / exp(η)
+        _lH = _atk_mean(home) / max(_dA, 1e-9) * np.exp(_ETA)
+        _lA = _atk_mean(away) / max(_dH, 1e-9) / np.exp(_ETA)
+        # Attack update: conjugate Gamma — add goals to shape, expected def to rate
+        _a_state[home] += hg;  _b_state[home] += _dA / np.exp(_ETA)
+        _a_state[away] += ag;  _b_state[away] += _dH * np.exp(_ETA)
+        # Defence update: add goals conceded to shape, expected attack rate to rate
+        _c_state[home] += ag;  _d_state[home] += _lA
+        _c_state[away] += hg;  _d_state[away] += _lH
+        # Within-season forgetting (applied after every match, both teams)
+        for _tm in (home, away):
+            _a_state[_tm] *= _PHI_W;  _b_state[_tm] *= _PHI_W
+            _c_state[_tm] *= _PHI_W;  _d_state[_tm] *= _PHI_W
+
+    def _between_season_forget(teams_in_season):
+        """Apply between-season forgetting to all teams that were in this season."""
+        for _tm in teams_in_season:
+            if _tm in _a_state:
+                _a_state[_tm] *= _PHI_B;  _b_state[_tm] *= _PHI_B
+                _c_state[_tm] *= _PHI_B;  _d_state[_tm] *= _PHI_B
+
+    def _snapshot(teams):
+        """Return a dict of current posterior means for the given teams."""
         _out = {}
-        for _tm in _teams:
-            _ii  = _ix[_tm]
-            _atk = float(_a[_ii] / _b[_ii])
-            _dfc = float(_c[_ii] / _d[_ii])
-            _out[_tm] = {"atk": round(_atk, 4), "def": round(_dfc, 4),
-                         "net": round(_atk / max(_dfc, 1e-6), 4)}
+        for _tm in teams:
+            if _tm not in _a_state: continue
+            _atk = _a_state[_tm] / _b_state[_tm]
+            _dfc = _c_state[_tm] / _d_state[_tm]
+            _out[_tm] = {
+                "atk": round(float(_atk), 4),
+                "def": round(float(_dfc), 4),
+                "net": round(float(_atk / max(_dfc, 1e-9)), 4),
+                # Posterior uncertainty (std of Gamma mean)
+                "atk_sd": round(float(np.sqrt(_a_state[_tm]) / _b_state[_tm]), 4),
+                "def_sd": round(float(np.sqrt(_c_state[_tm]) / _d_state[_tm]), 4),
+            }
         return _out
 
-    def _get_final_positions(standings_json):
-        _pos = {}
-        for _s in standings_json.get("standings", []):
-            if _s.get("type") == "TOTAL":
-                for _t in _s["table"]:
-                    _pos[_t["team"]["name"]] = _t["position"]
-                break
-        return _pos
+    # ── Run the continuous filter across all seasons ──────────────────
+    _season_ssm  = {}   # season_year -> snapshot dict
+    _season_pos  = {}   # season_year -> {team: final_position}
 
-    # Fetch and process each historical season
-    _season_ssm   = {}   # season -> {team -> {atk, def, net}}
-    _season_pos   = {}   # season -> {team -> position}
+    for _szn, _suffix in _SEASONS:
+        _matches = _fetch_csv(_suffix)
+        time.sleep(0.5)   # polite pause between CSV downloads
+        # Sort by date string (DD/MM/YY format on football-data.co.uk)
+        # Stable sort — ties (same date) go in file order (usually round order)
+        try:
+            from datetime import datetime as _dt
+            _matches.sort(key=lambda _m: _dt.strptime(_m["date"], "%d/%m/%Y")
+                          if "/" in _m["date"] and len(_m["date"]) > 7
+                          else _dt.strptime(_m["date"], "%d/%m/%y")
+                          if "/" in _m["date"] else _dt.min)
+        except Exception:
+            pass  # leave in file order if date parsing fails
 
-    for _szn in _HIST_SEASONS:
-        _sd = _api_hist("/competitions/PL/standings", {"season": _szn})
-        time.sleep(1)
-        _md = _api_hist("/competitions/PL/matches",   {"season": _szn})
-        time.sleep(1)
-        _season_pos[_szn]  = _get_final_positions(_sd)
-        _season_ssm[_szn]  = _run_ssm_on_season(_md.get("matches", []))
+        _season_teams = set()
+        for _m in _matches:
+            _ensure(_m["home"]); _ensure(_m["away"])
+            _season_teams.update((_m["home"], _m["away"]))
+            _update(_m["home"], _m["away"], _m["hg"], _m["ag"])
 
-    # Build per-team time-series across all historical seasons
-    # Normalise team names so we can match across seasons
-    _all_hist_teams = sorted({
-        _tn
-        for _szn in _HIST_SEASONS
-        for _tn in _season_ssm[_szn]
-    })
+        # Snapshot posterior means at end of season
+        _season_ssm[_szn] = _snapshot(_season_teams)
 
-    # season_ssm_history[team] = list of (season, atk, def, net, position)
-    # only include seasons where the team was in the PL (has SSM data)
+        # Build final table from match results (no API needed)
+        _pts: dict = {}; _gd: dict = {}; _gf: dict = {}
+        for _m in _matches:
+            for _tm in (_m["home"], _m["away"]):
+                if _tm not in _pts: _pts[_tm] = 0; _gd[_tm] = 0; _gf[_tm] = 0
+            _hg2, _ag2 = _m["hg"], _m["ag"]
+            _gf[_m["home"]] += _hg2; _gd[_m["home"]] += _hg2 - _ag2
+            _gf[_m["away"]] += _ag2; _gd[_m["away"]] += _ag2 - _hg2
+            if   _hg2 > _ag2: _pts[_m["home"]] += 3
+            elif _ag2 > _hg2: _pts[_m["away"]] += 3
+            else:              _pts[_m["home"]] += 1; _pts[_m["away"]] += 1
+        _sorted_t = sorted(_pts, key=lambda t: (-_pts[t], -_gd[t], -_gf[t]))
+        _season_pos[_szn] = {_tm: _ri + 1 for _ri, _tm in enumerate(_sorted_t)}
+
+        # Apply between-season forgetting before next season starts
+        _between_season_forget(_season_teams)
+
+    # ── Build per-team longitudinal record ───────────────────────────
+    # Include every team that appeared in ≥ 2 seasons (gives a trend)
+    _all_teams_hist = sorted({_tm for _szn in _season_ssm for _tm in _season_ssm[_szn]})
     _ssm_history = {}
-    for _tm in _all_hist_teams:
+    for _tm in _all_teams_hist:
         _rows = []
-        for _szn in _HIST_SEASONS:
-            _smdata = _season_ssm[_szn].get(_tm)
-            _pos    = _season_pos[_szn].get(_tm)
-            if _smdata and _pos:
-                _rows.append({
-                    "season":   _szn,
-                    "atk":      _smdata["atk"],
-                    "def":      _smdata["def"],
-                    "net":      _smdata["net"],
-                    "position": _pos,
-                })
-        if len(_rows) >= 2:   # need at least 2 points to fit a trend
+        for _szn, _ in _SEASONS:
+            _sm = _season_ssm.get(_szn, {}).get(_tm)
+            _pos = _season_pos.get(_szn, {}).get(_tm)
+            if _sm and _pos:
+                _rows.append({"season": _szn, "pos": _pos, **_sm})
+        if len(_rows) >= 2:
             _ssm_history[_tm] = _rows
 
-    ssm_history    = _ssm_history
-    season_ssm     = _season_ssm
-    season_pos     = _season_pos
+    ssm_history = _ssm_history
+    season_ssm  = _season_ssm
+    season_pos  = _season_pos
 
     return ssm_history, season_ssm, season_pos
 
@@ -1465,278 +1570,285 @@ def _(
     base64, io, mo, mpatches, np, plt,
     ssm_history, ssm_ratings,
 ):
-    """
-    For each team with ≥2 seasons of SSM history, fit a linear trend to α and δ,
-    then project to 2026 and 2027. Rank projected teams by net α/δ to estimate
-    finishing position.
-    """
-
     _TARGET_SEASONS = [2026, 2027]
-    _HIST_X         = [2020, 2021, 2022, 2023, 2024]   # x-axis = season start year
+    _HIST_SEASON_LABELS = {2019:"19/20",2020:"20/21",2021:"21/22",2022:"22/23",2023:"23/24",2024:"24/25"}
 
-    # ── Build projections ────────────────────────────────────────────
-    _projections = {}   # team -> {2026: {atk, def, net, atk_se, def_se}, 2027: {...}}
+    # ── Weighted linear regression helper ────────────────────────────
+    # Recency-weight each season so the most recent data pulls hardest.
+    # Weights: w_t = exp(λ · t) with λ = 0.5 (roughly halves weight each 2 seasons back).
+    def _wls(xs, ys, lam=0.5):
+        """Return (slope, intercept, residual_se) from WLS."""
+        _w  = np.exp(lam * (xs - xs[-1]))   # higher for more recent
+        _sw = _w.sum()
+        _xw = (xs * _w).sum() / _sw
+        _yw = (ys * _w).sum() / _sw
+        _sxx = ((xs - _xw)**2 * _w).sum()
+        _sxy = ((xs - _xw) * (ys - _yw) * _w).sum()
+        if _sxx < 1e-12:
+            return 0.0, _yw, float(np.std(ys))
+        _slope = _sxy / _sxx
+        _inter = _yw - _slope * _xw
+        _resid = ys - (_slope * xs + _inter)
+        _se    = float(np.sqrt((_w * _resid**2).sum() / _sw))
+        return float(_slope), float(_inter), max(_se, 1e-4)
+
+    # ── Build projections ─────────────────────────────────────────────
+    _projections = {}   # team -> {2026: {...}, 2027: {...}}
 
     for _tm, _rows in ssm_history.items():
         _xs  = np.array([_r["season"] for _r in _rows], dtype=float)
         _atk = np.array([_r["atk"]    for _r in _rows], dtype=float)
         _dfc = np.array([_r["def"]    for _r in _rows], dtype=float)
-        _pos = np.array([_r["position"] for _r in _rows], dtype=float)
+        _pos = np.array([_r["pos"]    for _r in _rows], dtype=float)
 
-        # Fit linear trend
-        _ca = np.polyfit(_xs, _atk, 1)   # slope, intercept for attack
-        _cd = np.polyfit(_xs, _dfc, 1)   # slope, intercept for defence
-        _cp = np.polyfit(_xs, _pos, 1)   # slope, intercept for position
-
-        # Residual std (uncertainty) for each metric
-        _se_a = float(np.std(_atk - np.polyval(_ca, _xs))) or 0.01
-        _se_d = float(np.std(_dfc - np.polyval(_cd, _xs))) or 0.01
-        _se_p = float(np.std(_pos - np.polyval(_cp, _xs))) or 0.5
+        # Weighted least-squares trend (recency-weighted)
+        _sa, _ia, _sea = _wls(_xs, _atk)
+        _sd, _id, _sed = _wls(_xs, _dfc)
+        _sp, _ip2, _sep = _wls(_xs, _pos)
 
         _proj = {}
         for _yr in _TARGET_SEASONS:
-            _pa = float(np.polyval(_ca, _yr))
-            _pd = float(np.polyval(_cd, _yr))
-            _pp = float(np.polyval(_cp, _yr))
-            # Extrapolation uncertainty grows with distance from last data point
-            _extrap = np.sqrt(1 + (_yr - _xs[-1])**2 / max(np.var(_xs), 1e-9))
+            _pa = float(_sa * _yr + _ia)
+            _pd = float(_sd * _yr + _id)
+            _pp = float(_sp * _yr + _ip2)
+            _gap    = _yr - _xs[-1]
+            _extrap = float(np.sqrt(1.0 + _gap + 0.5 * _gap**2))
             _proj[_yr] = {
-                "atk":    max(0.2, round(_pa, 3)),
-                "def":    max(0.2, round(_pd, 3)),
-                "net":    max(0.05, round(_pa / max(_pd, 1e-6), 3)),
-                "pos":    round(np.clip(_pp, 1, 20), 1),
-                "atk_se": round(_se_a * _extrap, 3),
-                "def_se": round(_se_d * _extrap, 3),
-                "pos_se": round(_se_p * _extrap, 1),
-                "atk_trend": float(_ca[0]),   # per-season slope
-                "def_trend": float(_cd[0]),
-                "pos_trend": float(_cp[0]),
+                "atk":       max(0.15, round(_pa, 3)),
+                "def":       max(0.15, round(_pd, 3)),
+                "net":       max(0.05, round(_pa / max(_pd, 1e-9), 3)),
+                "pos":       round(float(np.clip(_pp, 1, 20)), 1),
+                "atk_se":    round(float(_sea * _extrap), 3),
+                "def_se":    round(float(_sed * _extrap), 3),
+                "pos_se":    round(float(_sep * _extrap), 1),
+                "atk_trend": round(_sa, 4),
+                "def_trend": round(_sd, 4),
+                "pos_trend": round(_sp, 4),
             }
         _projections[_tm] = _proj
 
-    # ── Rank teams by projected net score for each future season ─────
+    # ── Rank by projected net score ───────────────────────────────────
     def _rank_by_net(_yr):
-        _nets = {_tm: _projections[_tm][_yr]["net"] for _tm in _projections if _yr in _projections[_tm]}
-        _sorted = sorted(_nets.items(), key=lambda x: -x[1])
-        return {_tm: _ri + 1 for _ri, (_tm, _) in enumerate(_sorted)}
+        _nets = {t: _projections[t][_yr]["net"] for t in _projections if _yr in _projections[t]}
+        _srt  = sorted(_nets.items(), key=lambda x: -x[1])
+        return {t: i + 1 for i, (t, _) in enumerate(_srt)}
 
     _rank_2026 = _rank_by_net(2026)
     _rank_2027 = _rank_by_net(2027)
 
-    # Also get current (end of 2024/25) actual positions for reference
-    _current_actual = {_tm: _rows[-1]["position"] for _tm, _rows in ssm_history.items()}
-
     # ── Identify predicted teams ──────────────────────────────────────
-    _pred_names = {_t.lower().replace(" fc","").strip() for _pk in PREDICTIONS.values() for _t in _pk}
-    def _is_pred(_nm):
-        _n = _nm.lower().replace(" fc","").strip()
-        return any(_n in _pp or _pp in _n for _pp in _pred_names)
+    _pred_names = {t.lower().replace(" fc","").strip() for pk in PREDICTIONS.values() for t in pk}
+    def _is_pred(nm):
+        n = nm.lower().replace(" fc","").strip()
+        return any(n in pp or pp in n for pp in _pred_names)
 
-    # ── Chart 1: Attack vs Defence scatter for 2026 projection ───────
-    _fig1, (_axL, _axR) = plt.subplots(1, 2, figsize=(15, 7), facecolor=BG)
-    for _ax, _yr, _rank_map in [(_axL, 2026, _rank_2026), (_axR, 2027, _rank_2027)]:
-        _ax.set_facecolor(CARD)
-        for _sp in _ax.spines.values(): _sp.set_edgecolor("#30363D")
+    def _shorten(nm):
+        return (nm.replace(" FC","").replace(" United","").replace(" Hotspur","")
+                  .replace(" City","").replace("Brighton & Hove Albion","Brighton")
+                  .replace("Wolverhampton Wanderers","Wolves")
+                  .replace("Nottingham","Nott'm"))
 
-        # Current season SSM ratings as faded backdrop
-        for _tm, _rat in ssm_ratings.items():
-            _ax.scatter(_rat["atk"], _rat["def"], color="#30363D", s=30, alpha=0.5, zorder=1)
+    # ── Chart 1: Side-by-side scatter 2026 vs 2027 ───────────────────
+    _fig1, (_axL, _axR) = plt.subplots(1, 2, figsize=(16, 7), facecolor=BG)
+    for _ax1, _yr1, _rank_map in [(_axL, 2026, _rank_2026), (_axR, 2027, _rank_2027)]:
+        _ax1.set_facecolor(CARD)
+        for _sp in _ax1.spines.values(): _sp.set_edgecolor("#30363D")
 
-        # Projected points with error bars
-        for _tm, _proj in _projections.items():
-            if _yr not in _proj: continue
-            _p  = _proj[_yr]
-            _ip = _is_pred(_tm)
+        # 2024/25 actuals as dark backdrop
+        for _tm2, _rat in ssm_ratings.items():
+            _ax1.scatter(_rat["atk"], _rat["def"], color="#252c38", s=35, alpha=0.7, zorder=1)
+
+        for _tm2, _proj in _projections.items():
+            if _yr1 not in _proj: continue
+            _p   = _proj[_yr1]
+            _ip  = _is_pred(_tm2)
             _col = "#6366f1" if _ip else "#4b5563"
-            _ax.errorbar(
+            _ax1.errorbar(
                 _p["atk"], _p["def"],
                 xerr=_p["atk_se"], yerr=_p["def_se"],
-                fmt="o", color=_col, markersize=8 if _ip else 5,
-                alpha=0.9 if _ip else 0.55,
-                elinewidth=0.8, capsize=3, capthick=0.8,
-                ecolor=_col + "88", zorder=3,
+                fmt="o", color=_col, markersize=9 if _ip else 5,
+                alpha=0.95 if _ip else 0.5,
+                elinewidth=0.8, capsize=3, capthick=0.8, ecolor=_col + "77", zorder=3,
             )
-            _short = (_tm.replace(" FC","").replace(" United","")
-                         .replace(" Hotspur","").replace(" City","")
-                         .replace("Brighton & Hove Albion","Brighton")
-                         .replace("Wolverhampton Wanderers","Wolves")
-                         .replace("Nottingham","Nott'm"))
-            _ax.annotate(
-                _short, (_p["atk"], _p["def"]),
-                textcoords="offset points", xytext=(5, 3),
-                fontsize=6.5 if not _ip else 7.5, fontfamily="monospace",
+            _ax1.annotate(
+                _shorten(_tm2), (_p["atk"], _p["def"]),
+                textcoords="offset points", xytext=(6, 3),
+                fontsize=7.5 if _ip else 6.2, fontfamily="monospace",
                 color=TEXT if _ip else MUTED,
                 fontweight="bold" if _ip else "normal", zorder=4,
             )
 
-        # Quadrant lines at current-season averages
-        _avg_atk = np.mean([_r["atk"] for _r in ssm_ratings.values()])
-        _avg_def = np.mean([_r["def"] for _r in ssm_ratings.values()])
-        _ax.axvline(_avg_atk, color="#30363D", lw=1, linestyle="--", alpha=0.7)
-        _ax.axhline(_avg_def, color="#30363D", lw=1, linestyle="--", alpha=0.7)
+        _proj_atks = [_projections[t][_yr1]["atk"] for t in _projections if _yr1 in _projections[t]]
+        _proj_defs = [_projections[t][_yr1]["def"] for t in _projections if _yr1 in _projections[t]]
+        if _proj_atks:
+            _ax1.axvline(np.mean(_proj_atks), color="#30363D", lw=1, ls="--", alpha=0.8)
+            _ax1.axhline(np.mean(_proj_defs), color="#30363D", lw=1, ls="--", alpha=0.8)
+            _mx1, _my1 = np.mean(_proj_atks), np.mean(_proj_defs)
+            _x0, _x1v = min(_proj_atks), max(_proj_atks)
+            _y0, _y1v = min(_proj_defs), max(_proj_defs)
+            for _xt, _yt, _lbl in [
+                (_mx1 + (_x1v-_mx1)*0.5, _my1 - (_my1-_y0)*0.6, "Elite"),
+                (_mx1 - (_mx1-_x0)*0.5, _my1 - (_my1-_y0)*0.6, "Defensive"),
+                (_mx1 + (_x1v-_mx1)*0.5, _my1 + (_y1v-_my1)*0.6, "Attack-heavy"),
+                (_mx1 - (_mx1-_x0)*0.5, _my1 + (_y1v-_my1)*0.6, "Struggling"),
+            ]:
+                _ax1.text(_xt, _yt, _lbl, color="#30363D", fontsize=7,
+                          ha="center", fontfamily="monospace", fontstyle="italic")
 
-        _ax.set_xlabel("Projected Attack α  (higher = more dangerous)",
-                       color=MUTED, fontsize=9, fontfamily="monospace")
-        _ax.set_ylabel("Projected Defence δ  (lower = stronger)",
-                       color=MUTED, fontsize=9, fontfamily="monospace")
-        _ax.set_title(f"Projected Team Strengths — {_yr}/{str(_yr+1)[-2:]}",
-                      color=TEXT, fontsize=11, fontfamily="monospace", pad=10)
-        _ax.tick_params(colors=MUTED, labelsize=8)
-        _ax.grid(color="#30363D", lw=0.4, linestyle="--", alpha=0.4)
-
-        # Legend
-        _ax.legend(
+        _ax1.set_xlabel("Projected Attack α  (higher = more dangerous)", color=MUTED, fontsize=9, fontfamily="monospace")
+        _ax1.set_ylabel("Projected Defence δ  (lower = stronger)", color=MUTED, fontsize=9, fontfamily="monospace")
+        _ax1.set_title(f"{'2026/27' if _yr1==2026 else '2027/28'} — Projected Strength",
+                       color=TEXT, fontsize=11, fontfamily="monospace", pad=10)
+        _ax1.tick_params(colors=MUTED, labelsize=8)
+        _ax1.grid(color="#30363D", lw=0.4, ls="--", alpha=0.4)
+        _ax1.legend(
             handles=[mpatches.Patch(color="#6366f1", label="Predicted team"),
                      mpatches.Patch(color="#4b5563", label="Other team"),
-                     mpatches.Patch(color="#30363D", label="Current (2025/26 actual)")],
+                     mpatches.Patch(color="#252c38", label="2024/25 actuals")],
             loc="upper right", framealpha=0.2, labelcolor=TEXT,
             fontsize=7, facecolor=CARD, edgecolor="#30363D",
         )
 
-    _fig1.suptitle("Multi-Season Bayesian Strength Projections  (error bars = extrapolation uncertainty)",
-                   color=TEXT, fontsize=11, fontfamily="monospace", y=1.01)
+    _fig1.suptitle("Projected Team Strengths  (error bars = extrapolation SE; continuous cross-season SSM with φ_W=0.975, φ_B=0.85)",
+                   color=TEXT, fontsize=9.5, fontfamily="monospace")
     _fig1.tight_layout(pad=1.5)
     _buf1 = io.BytesIO()
     _fig1.savefig(_buf1, format="png", dpi=130, bbox_inches="tight", facecolor=BG, edgecolor="none")
     plt.close(_fig1); _buf1.seek(0)
     _b64_scatter = base64.b64encode(_buf1.read()).decode()
 
-    # ── Chart 2: Trend lines for top teams ───────────────────────────
-    # Show attack and defence evolution + projection for top 8 by current net rating
+    # ── Chart 2: Longitudinal trend lines for top 10 teams ───────────
     _top_teams = sorted(
-        [_tm for _tm in ssm_history if _tm in ssm_ratings],
-        key=lambda _t: -ssm_ratings[_t]["net"]
-    )[:8]
+        [t for t in ssm_history if t in ssm_ratings],
+        key=lambda t: -ssm_ratings[t]["net"]
+    )[:10]
+    _hist_xs_all = sorted({r["season"] for t in _top_teams for r in ssm_history[t]})
+    _proj_xs = _hist_xs_all + _TARGET_SEASONS
 
-    _fig2, (_ax_atk, _ax_def) = plt.subplots(2, 1, figsize=(13, 8), facecolor=BG)
-    _fig2.suptitle("Attack & Defence Trends: Top 8 Teams (2020/21 → 2026/27 projected)",
-                   color=TEXT, fontsize=11, fontfamily="monospace")
-    _cmap = plt.cm.tab10(np.linspace(0, 1, len(_top_teams)))
+    _fig2, (_ax_atk2, _ax_def2) = plt.subplots(2, 1, figsize=(14, 9), facecolor=BG)
+    _fig2.suptitle(
+        "Attack & Defence Trends: Top 10 Teams (2019/20 → 2027/28 projected)\n"
+        "Solid = historical SSM posteriors  ·  Dashed = WLS recency-weighted projection",
+        color=TEXT, fontsize=10, fontfamily="monospace",
+    )
+    _cmap2 = plt.cm.tab10(np.linspace(0, 0.95, len(_top_teams)))
 
-    for _ci, _tm in enumerate(_top_teams):
-        _rows = ssm_history[_tm]
-        _xs   = [_r["season"] for _r in _rows]
-        _atks = [_r["atk"]    for _r in _rows]
-        _defs = [_r["def"]    for _r in _rows]
-        _col  = _cmap[_ci]
-        _lbl  = _tm.replace(" FC","").replace(" United","").replace(" Hotspur","")
+    for _ci, _tm3 in enumerate(_top_teams):
+        _rows3 = ssm_history[_tm3]
+        _xs3   = np.array([r["season"] for r in _rows3], dtype=float)
+        _atks3 = np.array([r["atk"]    for r in _rows3], dtype=float)
+        _defs3 = np.array([r["def"]    for r in _rows3], dtype=float)
+        _col3  = _cmap2[_ci]
+        _lbl3  = _shorten(_tm3)
 
-        # Historical
-        for _ax2, _ys in [(_ax_atk, _atks), (_ax_def, _defs)]:
-            _ax2.plot(_xs, _ys, "o-", color=_col, lw=2, markersize=5, alpha=0.85, label=_lbl)
+        for _ax3, _ys3 in [(_ax_atk2, _atks3), (_ax_def2, _defs3)]:
+            _ax3.plot(_xs3, _ys3, "o-", color=_col3, lw=2.2, markersize=6,
+                      alpha=0.9, label=_lbl3, solid_capstyle="round")
 
-        # Project forward if we have projection data
-        if _tm in _projections:
-            _proj_xs = [_xs[-1]] + _TARGET_SEASONS
-            _proj_atk = [_atks[-1]] + [_projections[_tm][_y]["atk"] for _y in _TARGET_SEASONS]
-            _proj_def = [_defs[-1]] + [_projections[_tm][_y]["def"] for _y in _TARGET_SEASONS]
-            _proj_atk_se = [0] + [_projections[_tm][_y]["atk_se"] for _y in _TARGET_SEASONS]
-            _proj_def_se = [0] + [_projections[_tm][_y]["def_se"] for _y in _TARGET_SEASONS]
+        if _tm3 in _projections:
+            _proj_atk3 = [_atks3[-1]] + [_projections[_tm3][y]["atk"] for y in _TARGET_SEASONS]
+            _proj_def3 = [_defs3[-1]] + [_projections[_tm3][y]["def"] for y in _TARGET_SEASONS]
+            _proj_xs3  = [int(_xs3[-1])] + _TARGET_SEASONS
+            _proj_atk_se3 = [0] + [_projections[_tm3][y]["atk_se"] for y in _TARGET_SEASONS]
+            _proj_def_se3 = [0] + [_projections[_tm3][y]["def_se"] for y in _TARGET_SEASONS]
 
-            _ax_atk.plot(_proj_xs[1:], _proj_atk[1:], "--", color=_col, lw=1.5, alpha=0.6)
-            _ax_def.plot(_proj_xs[1:], _proj_def[1:], "--", color=_col, lw=1.5, alpha=0.6)
-            for _yi, _yr in enumerate(_TARGET_SEASONS):
-                _ax_atk.errorbar(_yr, _proj_atk[_yi+1], yerr=_proj_atk_se[_yi+1],
-                                 fmt="D", color=_col, markersize=6, alpha=0.7,
-                                 elinewidth=1, capsize=3, ecolor=_col)
-                _ax_def.errorbar(_yr, _proj_def[_yi+1], yerr=_proj_def_se[_yi+1],
-                                 fmt="D", color=_col, markersize=6, alpha=0.7,
-                                 elinewidth=1, capsize=3, ecolor=_col)
+            _ax_atk2.plot(_proj_xs3, _proj_atk3, "--", color=_col3, lw=1.6, alpha=0.65)
+            _ax_def2.plot(_proj_xs3, _proj_def3, "--", color=_col3, lw=1.6, alpha=0.65)
+            for _yi3, _yr3 in enumerate(_TARGET_SEASONS):
+                _ax_atk2.errorbar(_yr3, _proj_atk3[_yi3+1], yerr=_proj_atk_se3[_yi3+1],
+                                  fmt="D", color=_col3, ms=7, alpha=0.8,
+                                  elinewidth=1.2, capsize=4, ecolor=_col3)
+                _ax_def2.errorbar(_yr3, _proj_def3[_yi3+1], yerr=_proj_def_se3[_yi3+1],
+                                  fmt="D", color=_col3, ms=7, alpha=0.8,
+                                  elinewidth=1.2, capsize=4, ecolor=_col3)
 
-    for _ax2, _ylabel, _title in [
-        (_ax_atk, "Attack α", "Attack Strength — solid=historical, dashed=projected"),
-        (_ax_def, "Defence δ (lower=better)", "Defence Weakness — solid=historical, dashed=projected"),
+    _szn_labels = {2019:"19/20",2020:"20/21",2021:"21/22",2022:"22/23",2023:"23/24",2024:"24/25",
+                   2026:"26/27 (proj)",2027:"27/28 (proj)"}
+    for _ax3b, _yl3, _ttl3 in [
+        (_ax_atk2, "Attack α  (higher = better)", "Attack Strength"),
+        (_ax_def2, "Defence δ  (lower = better)", "Defence Weakness"),
     ]:
-        _ax2.set_facecolor(CARD)
-        for _sp in _ax2.spines.values(): _sp.set_edgecolor("#30363D")
-        _ax2.set_ylabel(_ylabel, color=MUTED, fontsize=9, fontfamily="monospace")
-        _ax2.set_title(_title, color=TEXT, fontsize=10, fontfamily="monospace")
-        _ax2.tick_params(colors=MUTED, labelsize=8)
-        _ax2.grid(color="#30363D", lw=0.5, linestyle="--", alpha=0.5)
-        _ax2.set_xticks(_HIST_X + _TARGET_SEASONS)
-        _ax2.set_xticklabels(
-            [f"{s}/{str(s+1)[-2:]}" for s in _HIST_X + _TARGET_SEASONS],
-            color=MUTED, fontsize=8, rotation=30,
+        _ax3b.set_facecolor(CARD)
+        for _sp in _ax3b.spines.values(): _sp.set_edgecolor("#30363D")
+        _ax3b.set_ylabel(_yl3, color=MUTED, fontsize=9, fontfamily="monospace")
+        _ax3b.set_title(_ttl3, color=TEXT, fontsize=10, fontfamily="monospace")
+        _ax3b.tick_params(colors=MUTED, labelsize=7.5)
+        _ax3b.grid(color="#30363D", lw=0.5, ls="--", alpha=0.5)
+        _ax3b.set_xticks(_proj_xs)
+        _ax3b.set_xticklabels(
+            [_szn_labels.get(s, str(s)) for s in _proj_xs],
+            color=MUTED, fontsize=7.5, rotation=30,
         )
-        _ax2.axvspan(2025.5, 2027.5, alpha=0.06, color="#6366f1", zorder=0)
-        _ax2.legend(loc="upper right", framealpha=0.2, labelcolor=TEXT,
-                    fontsize=7, facecolor=CARD, edgecolor="#30363D", ncol=2)
+        _ax3b.axvspan(2025.5, 2027.5, alpha=0.07, color="#6366f1", zorder=0)
+        _ax3b.axvline(2025.5, color="#6366f1", lw=0.8, ls=":", alpha=0.5)
+        _ax3b.legend(loc="upper right", framealpha=0.2, labelcolor=TEXT,
+                     fontsize=6.5, facecolor=CARD, edgecolor="#30363D", ncol=2)
 
-    _ax_def.invert_yaxis()
+    _ax_def2.invert_yaxis()
     _fig2.tight_layout(pad=1.5)
     _buf2 = io.BytesIO()
     _fig2.savefig(_buf2, format="png", dpi=130, bbox_inches="tight", facecolor=BG, edgecolor="none")
     plt.close(_fig2); _buf2.seek(0)
     _b64_trends = base64.b64encode(_buf2.read()).decode()
 
-    # ── Projection table ─────────────────────────────────────────────
-    # Show all teams sorted by projected 2026 net score
+    # ── Projection table ──────────────────────────────────────────────
     _all_proj_teams = sorted(
-        [_tm for _tm in _projections if 2026 in _projections[_tm]],
-        key=lambda _t: -_projections[_t][2026]["net"],
+        [t for t in _projections if 2026 in _projections[t]],
+        key=lambda t: -_projections[t][2026]["net"],
     )
 
-    def _trend_badge(_slope, _is_atk=True):
-        """Return coloured UP/DOWN/FLAT badge. For atk: up is good. For def: down is good."""
-        _threshold = 0.005
-        if abs(_slope) < _threshold:
-            return '<span class="ssm-badge ssm-same">→ FLAT</span>'
-        _improving = (_slope > 0) if _is_atk else (_slope < 0)
-        if _improving:
-            return f'<span class="ssm-badge ssm-up">↑ {abs(_slope):.3f}/yr</span>'
-        return f'<span class="ssm-badge ssm-down">↓ {abs(_slope):.3f}/yr</span>'
+    def _trend_badge(slope, is_atk=True):
+        _thr = 0.003
+        if abs(slope) < _thr:
+            return '<span class="ssm-badge ssm-same">→ flat</span>'
+        _good = (slope > 0) if is_atk else (slope < 0)
+        _dir  = "↑" if slope > 0 else "↓"
+        _cls  = "ssm-up" if _good else "ssm-down"
+        return f'<span class="ssm-badge {_cls}">{_dir} {abs(slope):.3f}/yr</span>'
+
+    def _pos_style(rk):
+        if not isinstance(rk, int): return "color:#8B949E"
+        if rk <= 4:  return "color:#60a5fa;font-weight:700"
+        if rk <= 6:  return "color:#8b5cf6;font-weight:700"
+        if rk >= 18: return "color:#f87171;font-weight:700"
+        return "color:#8B949E"
 
     _table_rows = ""
-    for _ri, _tm in enumerate(_all_proj_teams):
-        _p26  = _projections[_tm][2026]
-        _p27  = _projections[_tm][2027]
-        _curr = ssm_ratings.get(_tm, {})
-        _ip   = _is_pred(_tm)
-        _short = (_tm.replace(" FC","").replace(" United","").replace(" Hotspur","")
-                     .replace(" City","").replace("Brighton & Hove Albion","Brighton")
-                     .replace("Wolverhampton Wanderers","Wolves")
-                     .replace("Nottingham","Nott'm Forest"))
-        _rk26 = _rank_2026.get(_tm, "—")
-        _rk27 = _rank_2027.get(_tm, "—")
-        # Colour code projected rank
-        def _pos_style(_rk):
-            if isinstance(_rk, int):
-                if _rk <= 4:   return "color:#60a5fa;font-weight:700"
-                if _rk <= 6:   return "color:#8b5cf6;font-weight:700"
-                if _rk >= 18:  return "color:#f87171;font-weight:700"
-            return "color:#8B949E"
-        _hl   = "background:rgba(99,102,241,0.08);" if _ip else ""
-        _bold = "font-weight:700;" if _ip else ""
+    for _ri, _tm4 in enumerate(_all_proj_teams):
+        _p26  = _projections[_tm4][2026]
+        _p27  = _projections[_tm4][2027]
+        _curr = ssm_ratings.get(_tm4, {})
+        _ip4  = _is_pred(_tm4)
+        _sh4  = _shorten(_tm4)
+        _rk26 = _rank_2026.get(_tm4, "—")
+        _rk27 = _rank_2027.get(_tm4, "—")
+        _hl4  = "background:rgba(99,102,241,0.08);" if _ip4 else ""
+        _bd4  = "font-weight:700;" if _ip4 else ""
+        _ca4  = f'{_curr["atk"]:.3f}' if _curr else "—"
+        _cd4  = f'{_curr["def"]:.3f}' if _curr else "—"
+        _ns4  = len(ssm_history.get(_tm4, []))
 
         _table_rows += (
-            f'<tr style="{_hl}">'
+            f'<tr style="{_hl4}">'
             f'<td style="text-align:center;color:#475569;font-family:monospace">{_ri+1}</td>'
-            f'<td style="{_bold}">{_short}</td>'
-            # Current season actual α/δ/net
-            f'<td style="text-align:center;color:#94a3b8;font-family:monospace">'
-            f'  {_curr.get("atk","—"):.3f}' if _curr else '<td style="text-align:center;color:#475569">—'
-            f'</td>'
-            f'<td style="text-align:center;color:#94a3b8;font-family:monospace">'
-            f'  {_curr.get("def","—"):.3f}' if _curr else '<td style="text-align:center;color:#475569">—'
-            f'</td>'
-            # Attack trend
-            f'<td style="text-align:center">{_trend_badge(_p26["atk_trend"], _is_atk=True)}</td>'
-            # Defence trend
-            f'<td style="text-align:center">{_trend_badge(_p26["def_trend"], _is_atk=False)}</td>'
-            # 2026 projection
+            f'<td style="{_bd4}">{_sh4}</td>'
+            f'<td style="text-align:center;color:#475569;font-size:0.75rem">{_ns4}</td>'
+            f'<td style="text-align:center;color:#94a3b8;font-family:monospace">{_ca4}</td>'
+            f'<td style="text-align:center;color:#94a3b8;font-family:monospace">{_cd4}</td>'
+            f'<td style="text-align:center">{_trend_badge(_p26["atk_trend"], is_atk=True)}</td>'
+            f'<td style="text-align:center">{_trend_badge(_p26["def_trend"], is_atk=False)}</td>'
             f'<td style="text-align:center;{_pos_style(_rk26)};font-family:monospace">'
-            f'#{_rk26} <span style="font-size:0.75rem;color:#8B949E">(±{_p26["pos_se"]:.0f})</span></td>'
+            f'#{_rk26}&nbsp;<span style="font-size:0.72rem;color:#8B949E">(±{_p26["pos_se"]:.0f})</span></td>'
             f'<td style="text-align:center;color:#94a3b8;font-family:monospace">'
-            f'{_p26["atk"]:.3f} <span style="font-size:0.7rem">±{_p26["atk_se"]:.3f}</span></td>'
+            f'{_p26["atk"]:.3f}&nbsp;<span style="font-size:0.68rem">±{_p26["atk_se"]:.3f}</span></td>'
             f'<td style="text-align:center;color:#94a3b8;font-family:monospace">'
-            f'{_p26["def"]:.3f} <span style="font-size:0.7rem">±{_p26["def_se"]:.3f}</span></td>'
-            # 2027 projection
+            f'{_p26["def"]:.3f}&nbsp;<span style="font-size:0.68rem">±{_p26["def_se"]:.3f}</span></td>'
             f'<td style="text-align:center;{_pos_style(_rk27)};font-family:monospace">'
-            f'#{_rk27} <span style="font-size:0.75rem;color:#8B949E">(±{_p27["pos_se"]:.0f})</span></td>'
+            f'#{_rk27}&nbsp;<span style="font-size:0.72rem;color:#8B949E">(±{_p27["pos_se"]:.0f})</span></td>'
             f'<td style="text-align:center;color:#94a3b8;font-family:monospace">'
-            f'{_p27["atk"]:.3f} <span style="font-size:0.7rem">±{_p27["atk_se"]:.3f}</span></td>'
+            f'{_p27["atk"]:.3f}&nbsp;<span style="font-size:0.68rem">±{_p27["atk_se"]:.3f}</span></td>'
             f'<td style="text-align:center;color:#94a3b8;font-family:monospace">'
-            f'{_p27["def"]:.3f} <span style="font-size:0.7rem">±{_p27["def_se"]:.3f}</span></td>'
+            f'{_p27["def"]:.3f}&nbsp;<span style="font-size:0.68rem">±{_p27["def_se"]:.3f}</span></td>'
             f'</tr>'
         )
 
@@ -1746,66 +1858,65 @@ def _(
       <div style="margin-top:16px">
 
         <div class="card" style="border-color:#6366f133">
-          <div class="section-title" style="color:#a5b4fc">🧠 How This Works</div>
+          <div class="section-title" style="color:#a5b4fc">🧠 Methodology — Ridall, Titman &amp; Pettitt (2024)</div>
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;font-size:0.82rem;color:#8B949E;line-height:1.7">
             <div>
-              <span style="color:#22d3ee;font-family:monospace;font-weight:700">Historical SSM</span><br>
-              The same Gamma-Poisson filter is applied to every completed season
-              from 2020/21 onwards. Each season's end-of-season posterior means
-              for attack α and defence δ are extracted per team.
+              <span style="color:#22d3ee;font-family:monospace;font-weight:700">Continuous cross-season SSM</span><br>
+              A single Gamma-Poisson filter runs across all 6 seasons from 2019/20 onwards.
+              Team states carry over between seasons rather than resetting — a key insight
+              from the paper that captures longer-term structural strength.
             </div>
             <div>
-              <span style="color:#a78bfa;font-family:monospace;font-weight:700">Trend Fitting</span><br>
-              For each team with data in ≥2 seasons, a linear trend is fitted
-              to their α and δ time-series. Uncertainty grows with extrapolation
-              distance (shown as error bars).
+              <span style="color:#a78bfa;font-family:monospace;font-weight:700">Dual forgetting factors</span><br>
+              φ_W = 0.975 discounts within-season (after every match).
+              φ_B = 0.85 is applied once per season boundary, allowing larger drift
+              across the summer to capture transfers and managerial changes.
             </div>
             <div>
-              <span style="color:#f59e0b;font-family:monospace;font-weight:700">Position Ranking</span><br>
-              Projected positions are derived by ranking all teams by projected
-              net score (α/δ) for each future season — not by Monte Carlo
-              simulation (that would require fixture schedules not yet released).
+              <span style="color:#f59e0b;font-family:monospace;font-weight:700">Recency-weighted projection</span><br>
+              End-of-season posterior snapshots form the time-series. WLS with
+              exponential recency weights (λ = 0.5/season) projects α and δ forward.
+              Uncertainty grows with extrapolation distance.
             </div>
           </div>
           <div style="margin-top:12px;font-size:0.76rem;color:#475569;font-family:monospace">
-            ⚠️ Projections assume linear trends continue — they don't account for transfers,
-            managerial changes, or promotion/relegation. Treat as indicative, not predictive.
+            Data: football-data.co.uk (free CSV downloads, no API rate limits, all seasons available) &nbsp;·&nbsp;
+            ⚠️ Projections don't account for transfers or promotion/relegation.
           </div>
         </div>
 
         <div class="card">
-          <div class="section-title">📊 Projected Standings Table — 2026/27 &amp; 2027/28</div>
+          <div class="section-title">📊 Projected Standings — 2026/27 &amp; 2027/28</div>
           <div style="overflow-x:auto">
-            <table class="ptable" style="font-size:0.78rem;min-width:900px">
+            <table class="ptable" style="font-size:0.78rem;min-width:960px">
               <thead>
                 <tr>
-                  <th style="text-align:center">#</th>
-                  <th>Team</th>
+                  <th style="text-align:center">#</th><th>Team</th>
+                  <th style="text-align:center" title="seasons of PL data">Szns</th>
                   <th style="text-align:center">Cur α</th>
                   <th style="text-align:center">Cur δ</th>
                   <th style="text-align:center">Atk trend</th>
                   <th style="text-align:center">Def trend</th>
-                  <th style="text-align:center" colspan="3">— 2026/27 Projection —</th>
-                  <th style="text-align:center" colspan="3">— 2027/28 Projection —</th>
+                  <th style="text-align:center;border-left:1px solid #30363D" colspan="3">— 2026/27 —</th>
+                  <th style="text-align:center;border-left:1px solid #30363D" colspan="3">— 2027/28 —</th>
                 </tr>
                 <tr style="font-size:0.7rem;color:#475569">
-                  <th></th><th></th><th></th><th></th><th></th><th></th>
-                  <th style="text-align:center">Pos</th>
-                  <th style="text-align:center">α</th>
-                  <th style="text-align:center">δ</th>
-                  <th style="text-align:center">Pos</th>
-                  <th style="text-align:center">α</th>
-                  <th style="text-align:center">δ</th>
+                  <th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+                  <th style="text-align:center;border-left:1px solid #1c2130">Pos</th>
+                  <th style="text-align:center">α</th><th style="text-align:center">δ</th>
+                  <th style="text-align:center;border-left:1px solid #1c2130">Pos</th>
+                  <th style="text-align:center">α</th><th style="text-align:center">δ</th>
                 </tr>
               </thead>
               <tbody>{_table_rows}</tbody>
             </table>
           </div>
           <div style="font-size:0.7rem;color:#475569;margin-top:10px;font-family:monospace">
-            <b style="color:#E6EDF3">Bold / shaded</b> = predicted by someone &nbsp;·&nbsp;
-            <span style="color:#60a5fa">Blue pos</span> = projected CL &nbsp;·&nbsp;
-            <span style="color:#8b5cf6">Purple</span> = projected Europa/Conference &nbsp;·&nbsp;
-            <span style="color:#f87171">Red</span> = projected relegation zone
+            <b style="color:#E6EDF3">Bold/shaded</b> = predicted by a player &nbsp;·&nbsp;
+            <span style="color:#60a5fa">Blue</span> = projected CL (1–4) &nbsp;·&nbsp;
+            <span style="color:#8b5cf6">Purple</span> = Europa/Conference (5–6) &nbsp;·&nbsp;
+            <span style="color:#f87171">Red</span> = relegation zone (18–20) &nbsp;·&nbsp;
+            Szns = seasons of PL data informing the trend
           </div>
         </div>
 
@@ -1813,20 +1924,18 @@ def _(
           <div class="section-title">🎯 Projected Strength Scatter — 2026/27 vs 2027/28</div>
           <img class="chart-img" src="data:image/png;base64,{_b64_scatter}" style="margin-bottom:8px">
           <div style="font-size:0.7rem;color:#475569;font-family:monospace">
-            Faded grey dots = current 2025/26 SSM ratings &nbsp;·&nbsp;
-            Coloured dots = projected values &nbsp;·&nbsp;
-            Error bars = extrapolation uncertainty &nbsp;·&nbsp;
-            Dashed lines = league averages
+            Dark grey = 2024/25 actuals &nbsp;·&nbsp; Coloured = projected &nbsp;·&nbsp;
+            Error bars = extrapolation SE &nbsp;·&nbsp; Dashed lines = projected league average &nbsp;·&nbsp;
+            Quadrant labels: Elite (high atk, low def) = top of table
           </div>
         </div>
 
         <div class="card">
-          <div class="section-title">📈 Attack &amp; Defence Trend Lines — Top 8 Teams</div>
+          <div class="section-title">📈 Attack &amp; Defence Trends — Top 10 Teams</div>
           <img class="chart-img" src="data:image/png;base64,{_b64_trends}">
           <div style="font-size:0.7rem;color:#475569;margin-top:8px;font-family:monospace">
-            Purple shaded region = projection window &nbsp;·&nbsp;
-            Diamond markers = projected values &nbsp;·&nbsp;
-            Defence axis is inverted (lower δ = stronger)
+            Purple region = projection window &nbsp;·&nbsp; ◆ = projected values with error bars &nbsp;·&nbsp;
+            Defence axis inverted (lower δ = stronger) &nbsp;·&nbsp; Solid = historical posterior, Dashed = WLS projection
           </div>
         </div>
 
@@ -1834,7 +1943,6 @@ def _(
     </details>
     """)
     return
-
 
 # ── Render.com deployment ─────────────────────────────────────────────────────
 if __name__ == "__main__":
