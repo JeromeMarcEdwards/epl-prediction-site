@@ -16,6 +16,7 @@ def _():
     import io, base64
     from datetime import datetime
     from collections import defaultdict
+    import numpy as np
 
     API_KEY = "7a874a538506441bbdc6b4aca3dbb648"
     HEADERS = {"X-Auth-Token": API_KEY}
@@ -59,7 +60,7 @@ def _():
     MUTED  = "#8B949E"
 
     return (
-        API_KEY, BASE, BG, CARD, COLORS, EX_BON, HEADERS, MUTED,
+        API_KEY, BASE, BG, CARD, COLORS, EX_BON, HEADERS, MUTED, np,
         PREDICTIONS, PREDICTIONS_2024, PREDICTIONS_2023, SEASON, T6_BON, TEXT,
         base64, datetime, defaultdict, io, matplotlib, mo,
         mpatches, pe, plt, requests,
@@ -116,6 +117,12 @@ def _(mo):
     details summary { cursor:pointer; font-family:'Space Mono',monospace; font-size:0.7rem;
         color:#8B949E; letter-spacing:0.1em; text-transform:uppercase; padding:10px 4px; user-select:none; }
     details summary:hover { color:#E6EDF3; }
+    .ssm-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:0.7rem;
+        font-family:'Space Mono',monospace; font-weight:700; }
+    .ssm-up   { background:#1a3a1a; color:#4ade80; border:1px solid #4ade8033; }
+    .ssm-down { background:#3a1a1a; color:#f87171; border:1px solid #f8717133; }
+    .ssm-same { background:#1c1c2e; color:#8B949E; border:1px solid #30363D; }
+    .proj-highlight { background: rgba(99,102,241,0.1); border-left: 3px solid #6366f1; padding: 12px 16px; border-radius: 8px; margin-bottom: 12px; }
     </style>
     """)
     return
@@ -269,7 +276,7 @@ def _(BASE, COLORS, EX_BON, HEADERS, PREDICTIONS, SEASON, T6_BON,
     fetched_at = datetime.now().strftime("%d %b %Y · %H:%M")
 
     return (
-        actual_pos, best_md, current_matchday, current_table, errors,
+        actual_pos, all_matches, best_md, current_matchday, current_table, errors,
         fetched_at, gw_scores, historical, ranked, recent, results,
         top_scorers, upcoming,
     )
@@ -320,7 +327,6 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2024, T6_BON,
             bk.append({"team": team, "pred": pr, "actual": ar, "dist": dist, "in_top6": in_t6, "exact": exact})
         return {"dist": dt, "top6": tb, "exact": eb, "total": dt + tb + eb, "breakdown": bk}
 
-    # 1. 2024 standings
     standings_data_2024 = _api_2024("/competitions/PL/standings", {"season": 2024})
     current_table_2024 = []
     for _s in standings_data_2024.get("standings", []):
@@ -339,7 +345,6 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2024, T6_BON,
     actual_pos_2024 = {t["name"]: t["pos"] for t in current_table_2024}
     current_matchday_2024 = standings_data_2024.get("season", {}).get("currentMatchday", "?")
 
-    # 2. 2024 matches for historical data
     matches_data_2024 = _api_2024("/competitions/PL/matches", {"season": 2024})
     all_matches_2024  = matches_data_2024.get("matches", [])
 
@@ -372,7 +377,6 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2024, T6_BON,
         _sorted = sorted(_stats_2024.items(), key=lambda x: (-x[1]["pts"], -(x[1]["gf"]-x[1]["ga"]), -x[1]["gf"]))
         historical_2024.append((_md, {n: i+1 for i, (n, _) in enumerate(_sorted)}))
 
-    # 3. 2024 scores
     results_2024   = {p: _score_2024(picks, actual_pos_2024) for p, picks in PREDICTIONS_2024.items()}
     ranked_2024    = sorted(results_2024.items(), key=lambda x: x[1]["total"])
     gw_scores_2024 = {p: [(md, _score_2024(picks, pos)["total"]) for md, pos in historical_2024]
@@ -437,7 +441,6 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2023, T6_BON,
             bk.append({"team": team, "pred": pr, "actual": ar, "dist": dist, "in_top6": in_t6, "exact": exact})
         return {"dist": dt, "top6": tb, "exact": eb, "total": dt + tb + eb, "breakdown": bk}
 
-    # 1. 2023-2024 standings
     standings_data_2023 = _api_2023("/competitions/PL/standings", {"season": 2023})
     current_table_2023 = []
     for _s in standings_data_2023.get("standings", []):
@@ -456,7 +459,6 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2023, T6_BON,
     actual_pos_2023 = {t["name"]: t["pos"] for t in current_table_2023}
     current_matchday_2023 = standings_data_2023.get("season", {}).get("currentMatchday", "?")
 
-    # 2. 2023-2024 matches for historical data
     matches_data_2023 = _api_2023("/competitions/PL/matches", {"season": 2023})
     all_matches_2023  = matches_data_2023.get("matches", [])
 
@@ -489,7 +491,6 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2023, T6_BON,
         _sorted = sorted(_stats_2023.items(), key=lambda x: (-x[1]["pts"], -(x[1]["gf"]-x[1]["ga"]), -x[1]["gf"]))
         historical_2023.append((_md, {n: i+1 for i, (n, _) in enumerate(_sorted)}))
 
-    # 3. 2023-2024 scores
     results_2023   = {p: _score_2023(picks, actual_pos_2023) for p, picks in PREDICTIONS_2023.items()}
     ranked_2023    = sorted(results_2023.items(), key=lambda x: x[1]["total"])
     gw_scores_2023 = {p: [(md, _score_2023(picks, pos)["total"]) for md, pos in historical_2023]
@@ -506,6 +507,243 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2023, T6_BON,
     return (
         actual_pos_2023, best_md_2023, current_matchday_2023, current_table_2023, errors_2023,
         fetched_at_2023, gw_scores_2023, historical_2023, ranked_2023, results_2023,
+    )
+
+
+# ─── NEW: Bayesian SSM computation cell ──────────────────────────────────────
+@app.cell(hide_code=True)
+def _(all_matches, current_table, np, PREDICTIONS, T6_BON, EX_BON):
+    """
+    Bayesian State-Space Model — Gamma-Poisson conjugate filter.
+
+    For each team i, we track latent attack α_i ~ Gamma(a_i, b_i)
+    and defence δ_i ~ Gamma(c_i, d_i).
+
+    After observing home goals H, away goals A:
+      Conjugate update (mean-field):
+        a_h += H,  b_h += E[1/δ_a] * exp(η)
+        a_a += A,  b_a += E[1/δ_h]
+        c_h += A,  d_h += E[α_a] / exp(η)
+        c_a += H,  d_a += E[α_h] * exp(η)
+
+    State evolution: multiply shape/rate by φ after each match
+    (preserves mean, inflates variance → tracks time-varying form).
+    """
+
+    # ── Hyperparameters ──────────────────────────────────────────────
+    PRIOR_SHAPE  = 4.0
+    PRIOR_RATE   = 4.0
+    PHI_WITHIN   = 0.975   # within-season forgetting factor
+    ETA          = 0.26    # home advantage (log scale)
+    N_SIM_SEASON = 5000    # MC simulations for season completion
+
+    # ── Identify all teams ──────────────────────────────────────────
+    ssm_teams = sorted({t["name"] for t in current_table})
+    n_teams   = len(ssm_teams)
+    idx       = {t: i for i, t in enumerate(ssm_teams)}
+
+    # ── Initialise Gamma parameters ─────────────────────────────────
+    a = np.full(n_teams, PRIOR_SHAPE)   # attack shape
+    b = np.full(n_teams, PRIOR_RATE)    # attack rate
+    c = np.full(n_teams, PRIOR_SHAPE)   # defence shape
+    d = np.full(n_teams, PRIOR_RATE)    # defence rate
+
+    def inv_mean(ci, di):
+        """E[1/X] for X ~ Gamma(c, d)"""
+        return di / (ci - 1) if ci > 1 else di / ci
+
+    def ssm_update(hi, ai, hg, ag):
+        """Conjugate mean-field update for one match."""
+        # Pre-update means
+        C_H = inv_mean(c[ai], d[ai]) * np.exp(ETA)
+        C_A = inv_mean(c[hi], d[hi])
+        D_A = (a[hi] / b[hi]) * np.exp(ETA)
+        D_H = (a[ai] / b[ai]) / np.exp(ETA)
+
+        # Attack updates
+        a[hi] += hg;  b[hi] += C_H
+        a[ai] += ag;  b[ai] += C_A
+        # Defence updates
+        c[hi] += ag;  d[hi] += D_A
+        c[ai] += hg;  d[ai] += D_H
+
+        # Forgetting (applied to involved teams)
+        for i in [hi, ai]:
+            a[i] *= PHI_WITHIN;  b[i] *= PHI_WITHIN
+            c[i] *= PHI_WITHIN;  d[i] *= PHI_WITHIN
+
+    # ── Run filter over all finished 2025-26 matches ─────────────────
+    finished = sorted(
+        [m for m in all_matches if m.get("status") == "FINISHED"],
+        key=lambda m: m.get("utcDate", "")
+    )
+    for _m in finished:
+        _hn = _m["homeTeam"]["name"]
+        _an = _m["awayTeam"]["name"]
+        _hg = _m["score"]["fullTime"].get("home")
+        _ag = _m["score"]["fullTime"].get("away")
+        if _hn in idx and _an in idx and _hg is not None and _ag is not None:
+            ssm_update(idx[_hn], idx[_an], int(_hg), int(_ag))
+
+    # ── Remaining fixtures ───────────────────────────────────────────
+    remaining = [
+        m for m in all_matches
+        if m.get("status") in ("SCHEDULED", "TIMED")
+        and m["homeTeam"]["name"] in idx
+        and m["awayTeam"]["name"] in idx
+    ]
+    n_remaining = len(remaining)
+
+    # ── Current points from actual table ────────────────────────────
+    current_pts = {}
+    current_gf  = {}
+    current_gd  = {}
+    for _t in current_table:
+        current_pts[_t["name"]] = _t["pts"]
+        current_gf[_t["name"]]  = _t["gf"]
+        current_gd[_t["name"]]  = _t["goalDifference"]
+
+    # ── Attack/defence means for rating table ────────────────────────
+    ssm_ratings = {}
+    for team in ssm_teams:
+        i = idx[team]
+        atk = a[i] / b[i]
+        dfc = c[i] / d[i]
+        ssm_ratings[team] = {
+            "atk": round(atk, 3),
+            "def": round(dfc, 3),
+            "net": round(atk / dfc, 3),
+            "atk_sd": round(np.sqrt(a[i] / b[i]**2), 3),
+            "def_sd": round(np.sqrt(c[i] / d[i]**2), 3),
+        }
+
+    # ── Monte Carlo season completion ────────────────────────────────
+    rng = np.random.default_rng(42)
+
+    # Pre-draw Gamma samples for efficiency
+    # Shape: (N_SIM_SEASON, n_teams)
+    atk_samples = rng.gamma(a, 1.0 / b, size=(N_SIM_SEASON, n_teams))
+    def_samples = rng.gamma(c, 1.0 / d, size=(N_SIM_SEASON, n_teams))
+    atk_samples = np.clip(atk_samples, 0.05, 10)
+    def_samples = np.clip(def_samples, 0.05, 10)
+
+    # Simulate each remaining fixture across all sims
+    sim_pts  = {t: np.full(N_SIM_SEASON, current_pts.get(t, 0), dtype=float) for t in ssm_teams}
+    sim_gd   = {t: np.full(N_SIM_SEASON, current_gd.get(t, 0),  dtype=float) for t in ssm_teams}
+    sim_gf   = {t: np.full(N_SIM_SEASON, current_gf.get(t, 0),  dtype=float) for t in ssm_teams}
+
+    for _m in remaining:
+        hn = _m["homeTeam"]["name"]
+        an = _m["awayTeam"]["name"]
+        hi2 = idx[hn]; ai2 = idx[an]
+
+        lam_H = atk_samples[:, hi2] / def_samples[:, ai2] * np.exp(ETA)
+        lam_A = atk_samples[:, ai2] / def_samples[:, hi2]
+        lam_H = np.clip(lam_H, 0.05, 10)
+        lam_A = np.clip(lam_A, 0.05, 10)
+
+        hg_sim = rng.poisson(lam_H)
+        ag_sim = rng.poisson(lam_A)
+
+        home_win = hg_sim > ag_sim
+        draw     = hg_sim == ag_sim
+        away_win = ag_sim > hg_sim
+
+        sim_pts[hn] += np.where(home_win, 3, np.where(draw, 1, 0))
+        sim_pts[an] += np.where(away_win, 3, np.where(draw, 1, 0))
+        sim_gd[hn]  += (hg_sim - ag_sim).astype(float)
+        sim_gd[an]  += (ag_sim - hg_sim).astype(float)
+        sim_gf[hn]  += hg_sim.astype(float)
+        sim_gf[an]  += ag_sim.astype(float)
+
+    # ── Final position distributions from simulations ────────────────
+    # For each sim, rank teams by (pts desc, gd desc, gf desc)
+    team_list = ssm_teams
+
+    pts_mat = np.stack([sim_pts[t] for t in team_list], axis=1)   # (N_SIM, 20)
+    gd_mat  = np.stack([sim_gd[t]  for t in team_list], axis=1)
+    gf_mat  = np.stack([sim_gf[t]  for t in team_list], axis=1)
+
+    # Rank: higher pts = lower rank number (1 = champion)
+    # Use negative for descending sort
+    sort_key = np.stack([-pts_mat, -gd_mat, -gf_mat], axis=2)  # (N_SIM, 20, 3)
+
+    # Compute position for each team in each sim
+    # argsort twice gives ranks
+    ranks = np.zeros((N_SIM_SEASON, n_teams), dtype=int)
+    for sim_i in range(N_SIM_SEASON):
+        order = np.lexsort(sort_key[sim_i, :, ::-1].T)[::-1]
+        ranks[sim_i, order] = np.arange(1, n_teams + 1)
+
+    # Expected final position and distribution
+    mean_pos  = ranks.mean(axis=0)
+    std_pos   = ranks.std(axis=0)
+    top1_prob = (ranks == 1).mean(axis=0)
+    top4_prob = (ranks <= 4).mean(axis=0)
+    top6_prob = (ranks <= 6).mean(axis=0)
+    rel_prob  = (ranks >= 18).mean(axis=0)
+    mean_pts  = np.array([sim_pts[t].mean() for t in team_list])
+
+    # Build predicted final table (sorted by mean_pos)
+    pred_table_order = np.argsort(mean_pos)
+    predicted_final_table = []
+    for rank_i, ti in enumerate(pred_table_order):
+        team = team_list[ti]
+        current_pos = next((t["pos"] for t in current_table if t["name"] == team), rank_i + 1)
+        predicted_final_table.append({
+            "pred_pos":  rank_i + 1,
+            "curr_pos":  current_pos,
+            "name":      team,
+            "mean_pos":  round(float(mean_pos[ti]), 1),
+            "std_pos":   round(float(std_pos[ti]), 1),
+            "mean_pts":  round(float(mean_pts[ti]), 1),
+            "curr_pts":  current_pts.get(team, 0),
+            "top1_pct":  round(float(top1_prob[ti]) * 100, 1),
+            "top4_pct":  round(float(top4_prob[ti]) * 100, 1),
+            "top6_pct":  round(float(top6_prob[ti]) * 100, 1),
+            "rel_pct":   round(float(rel_prob[ti]) * 100, 1),
+        })
+
+    # ── Predicted final positions dict (for scoring) ─────────────────
+    pred_pos_dict = {row["name"]: row["pred_pos"] for row in predicted_final_table}
+
+    # ── Apply scoring formula to predicted final table ───────────────
+    def _fuzzy_ssm(team, pos_dict):
+        if team in pos_dict:
+            return pos_dict[team]
+        tl = team.lower().replace(" fc", "").strip()
+        for k, v in pos_dict.items():
+            kl = k.lower().replace(" fc", "").strip()
+            if tl in kl or kl in tl:
+                return v
+            if len(set(tl.split()) & set(kl.split())) >= 2:
+                return v
+        return None
+
+    def _score_ssm(picks, pos_dict):
+        top6 = {t for t, p in pos_dict.items() if p <= 6}
+        dt = tb = eb = 0
+        bk = []
+        for pr, team in enumerate(picks, 1):
+            ar = _fuzzy_ssm(team, pos_dict)
+            if ar is None:
+                bk.append({"team": team, "pred": pr, "proj": "?", "dist": 0, "in_top6": False, "exact": False})
+                continue
+            dist  = abs(pr - ar)
+            in_t6 = any(team.lower().replace(" fc","") in t.lower() or t.lower() in team.lower() for t in top6)
+            exact = (pr == ar)
+            dt += dist
+            if in_t6: tb += T6_BON
+            if exact: eb += EX_BON
+            bk.append({"team": team, "pred": pr, "proj": ar, "dist": dist, "in_top6": in_t6, "exact": exact})
+        return {"dist": dt, "top6": tb, "exact": eb, "total": dt + tb + eb, "breakdown": bk}
+
+    projected_scores = {p: _score_ssm(picks, pred_pos_dict) for p, picks in PREDICTIONS.items()}
+    projected_ranked = sorted(projected_scores.items(), key=lambda x: x[1]["total"])
+
+    return (
+        N_SIM_SEASON, n_remaining, pred_pos_dict, predicted_final_table,
+        projected_ranked, projected_scores, ssm_ratings, ssm_teams,
     )
 
 
@@ -804,7 +1042,6 @@ def _(mo, recent, upcoming):
 def _(BG, CARD, COLORS, MUTED, PREDICTIONS, TEXT, base64,
       best_md, current_table, gw_scores, io, mo, pe, plt, ranked, results):
 
-    # Gap to leader chart
     _fig3, _ax3 = plt.subplots(figsize=(12, 3.5), facecolor=BG)
     _ax3.set_facecolor(CARD)
     for _sp in _ax3.spines.values(): _sp.set_edgecolor("#30363D")
@@ -848,7 +1085,6 @@ def _(BG, CARD, COLORS, MUTED, PREDICTIONS, TEXT, base64,
     plt.close(_fig3); _buf3.seek(0)
     _b64_3 = base64.b64encode(_buf3.read()).decode()
 
-    # Fact cards
     _lp, _ls  = ranked[0]
     _gap12    = results[ranked[1][0]]["total"] - results[ranked[0][0]]["total"]
     _top6n    = {t["name"] for t in current_table if t["pos"] <= 6}
@@ -937,7 +1173,6 @@ def _(mo):
     return
 
 
-# ─── HELPER: build a season evolution chart as a base64 PNG ───────────────────
 @app.cell(hide_code=True)
 def _(BG, CARD, COLORS, MUTED, TEXT, base64, io, pe, plt):
 
@@ -985,7 +1220,6 @@ def _(BG, CARD, COLORS, MUTED, TEXT, base64, io, pe, plt):
     return (make_evolution_chart,)
 
 
-# ─── HELPER: build leaderboard + breakdown HTML for any season ────────────────
 @app.cell(hide_code=True)
 def _(COLORS):
 
@@ -999,7 +1233,6 @@ def _(COLORS):
 
         err_str = f" · ⚠️ {'; '.join(errors_list)}" if errors_list else ""
 
-        # Leaderboard rows
         lb_rows = ""
         for i, (p, _) in enumerate(ranked_data):
             s = results_data[p]; c = COLORS[p]
@@ -1015,7 +1248,6 @@ def _(COLORS):
               <span class="lb-pts" style="color:{c}">{s['total']}</span>
             </div>"""
 
-        # Pick-by-pick breakdown cards
         pick_cards = ""
         for i, (p, _) in enumerate(ranked_data):
             c = COLORS[p]; s = results_data[p]
@@ -1054,7 +1286,6 @@ def _(COLORS):
     return (make_season_html,)
 
 
-# ─── 2024/25 Season collapsible ───────────────────────────────────────────────
 @app.cell(hide_code=True)
 def _(
     current_matchday_2024, current_table_2024, errors_2024, fetched_at_2024,
@@ -1087,7 +1318,6 @@ def _(
     return
 
 
-# ─── 2023/24 Season collapsible ───────────────────────────────────────────────
 @app.cell(hide_code=True)
 def _(
     current_matchday_2023, current_table_2023, errors_2023, fetched_at_2023,
@@ -1114,6 +1344,330 @@ def _(
         </div>
         <div class="section-title">📋 Pick-by-pick Breakdown</div>
         {_bd_2023}
+      </div>
+    </details>
+    """)
+    return
+
+
+# ─── NEW: Bayesian SSM collapsible section ────────────────────────────────────
+@app.cell(hide_code=True)
+def _(
+    BG, CARD, COLORS, MUTED, N_SIM_SEASON, PREDICTIONS, TEXT,
+    base64, current_table, io, mo, mpatches, n_remaining,
+    np, plt, pred_pos_dict, predicted_final_table,
+    projected_ranked, projected_scores, ssm_ratings, ssm_teams,
+):
+    medals_ssm = ["🥇", "🥈", "🥉"]
+
+    # ── Chart 1: Predicted final table (horizontal bar, pts) ────────────
+    _fig_a, _ax_a = plt.subplots(figsize=(12, 6), facecolor=BG)
+    _ax_a.set_facecolor(CARD)
+    for _sp in _ax_a.spines.values(): _sp.set_edgecolor("#30363D")
+
+    _names_a  = [r["name"].replace(" FC","").replace(" United","").replace(" Hotspur","")
+                 for r in predicted_final_table]
+    _pts_a    = [r["mean_pts"] for r in predicted_final_table]
+    _curr_a   = [r["curr_pts"] for r in predicted_final_table]
+
+    _colors_a = []
+    for r in predicted_final_table:
+        if r["pred_pos"] <= 4:    _colors_a.append("#60a5fa")
+        elif r["pred_pos"] == 5:  _colors_a.append("#f59e0b")
+        elif r["pred_pos"] == 6:  _colors_a.append("#8b5cf6")
+        elif r["pred_pos"] >= 18: _colors_a.append("#f87171")
+        else:                     _colors_a.append("#374151")
+
+    _y_a = np.arange(len(_names_a))
+    _bars_a  = _ax_a.barh(_y_a, _pts_a[::-1], color=_colors_a[::-1], alpha=0.75, height=0.6, label="Projected final pts")
+    _ax_a.barh(_y_a, _curr_a[::-1], color=[c + "55" for c in _colors_a[::-1]], height=0.6, label="Current pts")
+
+    for i, (bar, row) in enumerate(zip(_bars_a, reversed(predicted_final_table))):
+        _ax_a.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2,
+                   f"{row['mean_pts']:.0f} ± {row['std_pos']:.0f}  (top6: {row['top6_pct']:.0f}%)",
+                   va="center", color=MUTED, fontsize=7.5, fontfamily="monospace")
+
+    _ax_a.set_yticks(_y_a)
+    _ax_a.set_yticklabels([n for n in reversed(_names_a)], fontsize=8.5, color=TEXT)
+    _ax_a.set_xlabel("Points", color=MUTED, fontsize=9, fontfamily="monospace")
+    _ax_a.set_title(f"Predicted Final Table — 2025/26  ({N_SIM_SEASON:,} simulations, {n_remaining} fixtures remaining)",
+                    color=TEXT, fontsize=10, fontfamily="monospace", pad=12)
+    _ax_a.tick_params(colors=MUTED)
+    _ax_a.grid(axis="x", color="#30363D", lw=0.6, linestyle="--", alpha=0.6)
+    _ax_a.set_xlim(0, max(_pts_a) + 18)
+    _leg_a = [mpatches.Patch(color="#60a5fa", label="CL (1–4)"),
+              mpatches.Patch(color="#f59e0b", label="EL (5)"),
+              mpatches.Patch(color="#8b5cf6", label="Conf. (6)"),
+              mpatches.Patch(color="#f87171", label="Relegation (18–20)"),
+              mpatches.Patch(color="#4FC3C3", label="Projected pts"),
+              mpatches.Patch(color="#4FC3C3aa", label="Current pts")]
+    _ax_a.legend(handles=_leg_a, loc="lower right", framealpha=0.2, labelcolor=TEXT,
+                 fontsize=7, facecolor=CARD, edgecolor="#30363D", ncol=2)
+    _fig_a.tight_layout(pad=1.5)
+    _buf_a = io.BytesIO()
+    _fig_a.savefig(_buf_a, format="png", dpi=140, bbox_inches="tight", facecolor=BG)
+    plt.close(_fig_a); _buf_a.seek(0)
+    _b64_a = base64.b64encode(_buf_a.read()).decode()
+
+    # ── Chart 2: Team strength ratings (attack vs defence scatter) ──────
+    _fig_b, _ax_b = plt.subplots(figsize=(10, 6), facecolor=BG)
+    _ax_b.set_facecolor(CARD)
+    for _sp in _ax_b.spines.values(): _sp.set_edgecolor("#30363D")
+
+    _all_pred_teams = {t.lower().replace(" fc","").strip() for picks in PREDICTIONS.values() for t in picks}
+    def _is_pred_team(name):
+        n = name.lower().replace(" fc","").strip()
+        return any(n in p or p in n for p in _all_pred_teams)
+
+    for team, rat in ssm_ratings.items():
+        _is_p = _is_pred_team(team)
+        _col  = "#6366f1" if _is_p else "#374151"
+        _alpha = 0.9 if _is_p else 0.5
+        _size  = 90 if _is_p else 50
+        _ax_b.scatter(rat["atk"], rat["def"], color=_col, s=_size, alpha=_alpha, zorder=3,
+                      edgecolors="#ffffff33", linewidth=0.5)
+        _short = team.replace(" FC","").replace(" United","").replace(" Hotspur","").replace(" City","").replace("Brighton & Hove Albion","Brighton")
+        _ax_b.annotate(_short, (rat["atk"], rat["def"]),
+                       textcoords="offset points", xytext=(5, 3),
+                       fontsize=7, color=TEXT if _is_p else MUTED, fontfamily="monospace",
+                       fontweight="bold" if _is_p else "normal")
+
+    # Quadrant lines at league average
+    _atk_avg = np.mean([r["atk"] for r in ssm_ratings.values()])
+    _def_avg = np.mean([r["def"] for r in ssm_ratings.values()])
+    _ax_b.axvline(_atk_avg, color="#30363D", lw=1, linestyle="--", alpha=0.8)
+    _ax_b.axhline(_def_avg, color="#30363D", lw=1, linestyle="--", alpha=0.8)
+
+    _ax_b.set_xlabel("Attack strength α  (higher = more dangerous)", color=MUTED, fontsize=9, fontfamily="monospace")
+    _ax_b.set_ylabel("Defence weakness δ  (lower = stronger defence)", color=MUTED, fontsize=9, fontfamily="monospace")
+    _ax_b.set_title("Bayesian SSM Team Ratings — Posterior Means", color=TEXT, fontsize=10, fontfamily="monospace", pad=10)
+    _ax_b.tick_params(colors=MUTED, labelsize=8)
+    _ax_b.grid(color="#30363D", lw=0.4, linestyle="--", alpha=0.4)
+
+    # Quadrant labels
+    for txt, x, y, ha in [
+        ("Strong attack\nStrong defence", 0.97, 0.03, "right"),
+        ("Weak attack\nStrong defence",   0.03, 0.03, "left"),
+        ("Strong attack\nWeak defence",   0.97, 0.97, "right"),
+        ("Weak attack\nWeak defence",     0.03, 0.97, "left"),
+    ]:
+        _ax_b.text(x, y, txt, transform=_ax_b.transAxes, fontsize=7,
+                   color="#ffffff22", ha=ha, va="top" if y > 0.5 else "bottom",
+                   fontfamily="monospace")
+
+    _leg_b = [mpatches.Patch(color="#6366f1", label="Predicted team"),
+              mpatches.Patch(color="#374151", label="Other team")]
+    _ax_b.legend(handles=_leg_b, loc="upper right", framealpha=0.2, labelcolor=TEXT,
+                 fontsize=8, facecolor=CARD, edgecolor="#30363D")
+    _fig_b.tight_layout(pad=1.5)
+    _buf_b = io.BytesIO()
+    _fig_b.savefig(_buf_b, format="png", dpi=140, bbox_inches="tight", facecolor=BG)
+    plt.close(_fig_b); _buf_b.seek(0)
+    _b64_b = base64.b64encode(_buf_b.read()).decode()
+
+    # ── Predicted final table HTML ───────────────────────────────────────
+    def _move_badge(curr, pred):
+        diff = curr - pred
+        if diff > 0:
+            return f'<span class="ssm-badge ssm-up">▲ {diff}</span>'
+        elif diff < 0:
+            return f'<span class="ssm-badge ssm-down">▼ {abs(diff)}</span>'
+        return '<span class="ssm-badge ssm-same">–</span>'
+
+    _table_rows = ""
+    for row in predicted_final_table:
+        _short = row["name"].replace(" FC","").replace(" United","").replace(" Hotspur","")
+        _pos_col = ("color:#60a5fa;" if row["pred_pos"] <= 4 else
+                    "color:#f59e0b;" if row["pred_pos"] == 5 else
+                    "color:#8b5cf6;" if row["pred_pos"] == 6 else
+                    "color:#f87171;" if row["pred_pos"] >= 18 else "color:#8B949E;")
+        _hl = "background:#1a1f2e;" if row["pred_pos"] <= 6 else ""
+        _hl = "background:#2e1a1a;" if row["pred_pos"] >= 18 else _hl
+        _is_p = _is_pred_team(row["name"])
+        _bold = "font-weight:700;" if _is_p else ""
+        _table_rows += (
+            f'<tr style="{_hl}">'
+            f'<td style="text-align:center;{_pos_col}font-family:monospace;font-weight:700">{row["pred_pos"]}</td>'
+            f'<td style="{_bold}">{_short}</td>'
+            f'<td style="text-align:center">{_move_badge(row["curr_pos"], row["pred_pos"])}</td>'
+            f'<td style="text-align:center;color:#8B949E;font-family:monospace">{row["curr_pts"]}</td>'
+            f'<td style="text-align:center;font-family:monospace;font-weight:700;color:#E6EDF3">{row["mean_pts"]:.0f}</td>'
+            f'<td style="text-align:center;color:#8B949E;font-size:0.8rem">{row["std_pos"]:.1f}</td>'
+            f'<td style="text-align:center;color:#60a5fa">{row["top4_pct"]:.0f}%</td>'
+            f'<td style="text-align:center;color:#8b5cf6">{row["top6_pct"]:.0f}%</td>'
+            f'<td style="text-align:center;color:#f87171">{row["rel_pct"]:.0f}%</td>'
+            f'</tr>'
+        )
+
+    # ── Projected scores section ─────────────────────────────────────────
+    def _rc_proj(b): return "exact" if b["exact"] else ("top6" if b["in_top6"] else "")
+    def _dc_proj(b):
+        if b["exact"]: return "d-good"
+        return "d-bad" if b["dist"] > 3 else ("d-ok" if b["dist"] > 0 else "d-good")
+
+    _proj_lb = ""
+    for i, (p, _) in enumerate(projected_ranked):
+        s = projected_scores[p]; c = COLORS[p]
+        _proj_lb += f"""
+        <div class="lb-row" style="border-color:{c}55">
+          <span class="lb-medal">{medals_ssm[i]}</span>
+          <span class="lb-name" style="color:{c}">{p}</span>
+          <span class="lb-detail">
+            <span>📏 dist: <b>+{s['dist']}</b></span>
+            <span>✅ top-6: <b>{s['top6']}</b></span>
+            <span>🎯 exact: <b>{s['exact']}</b></span>
+          </span>
+          <span class="lb-pts" style="color:{c}">{s['total']}</span>
+        </div>"""
+
+    _proj_cards = ""
+    for i, (p, _) in enumerate(projected_ranked):
+        c = COLORS[p]; s = projected_scores[p]
+        rows = ""
+        for b in s["breakdown"]:
+            short = b["team"].replace(" FC","").replace(" United","").replace(" City"," C.").replace(" Hotspur","")
+            rows += (f'<tr class="{_rc_proj(b)}"><td style="color:#8B949E">{b["pred"]}</td>'
+                     f'<td>{short}</td><td style="text-align:center">{b["proj"]}</td>'
+                     f'<td style="text-align:center" class="{_dc_proj(b)}">{b["dist"]}</td></tr>')
+        legend = ('<tr><td colspan="4" style="padding-top:10px;font-size:0.7rem;color:#8B949E">'
+                  '<span style="background:#1a2e1a;padding:2px 8px;border-radius:4px;color:#FFD700;margin-right:8px">🎯 exact (−5)</span>'
+                  '<span style="background:#14232b;padding:2px 8px;border-radius:4px;color:#4FC3C3">✅ top-6 (−2)</span></td></tr>')
+        _proj_cards += (f'<div class="card" style="border-color:{c}44">'
+                        f'<div class="section-title" style="color:{c}">{medals_ssm[i]} {p} &nbsp;·&nbsp;'
+                        f'<span style="color:#E6EDF3;font-size:0.85rem">Projected: {s["total"]} pts</span></div>'
+                        f'<table class="ptable"><thead><tr><th>#</th><th>Predicted</th>'
+                        f'<th style="text-align:center">Proj. Pos</th><th style="text-align:center">Δ</th>'
+                        f'</tr></thead><tbody>{rows}{legend}</tbody></table></div>')
+
+    # ── SSM ratings table ────────────────────────────────────────────────
+    _sorted_ratings = sorted(ssm_ratings.items(), key=lambda x: -x[1]["net"])
+    _ratings_rows = ""
+    for ri, (team, rat) in enumerate(_sorted_ratings):
+        _short = team.replace(" FC","").replace(" United","").replace(" Hotspur","")
+        _is_p = _is_pred_team(team)
+        _bold = "font-weight:700;" if _is_p else ""
+        _net_col = ("#22d3ee" if ri < 4 else "#a78bfa" if ri < 8 else "#f87171" if ri >= 16 else "#94a3b8")
+        _ratings_rows += (
+            f'<tr><td style="text-align:center;color:#475569;font-family:monospace">{ri+1}</td>'
+            f'<td style="{_bold}">{_short}</td>'
+            f'<td style="text-align:center;color:#94a3b8;font-family:monospace">{rat["atk"]:.3f}</td>'
+            f'<td style="text-align:center;color:#94a3b8;font-family:monospace">{rat["def"]:.3f}</td>'
+            f'<td style="text-align:center;color:{_net_col};font-family:monospace;font-weight:700">{rat["net"]:.3f}</td>'
+            f'</tr>'
+        )
+
+    mo.Html(f"""
+    <details>
+      <summary>🤖 Bayesian SSM — Season Forecast &amp; Projected Scores</summary>
+      <div style="margin-top:16px">
+
+        <div class="card" style="border-color:#6366f133">
+          <div class="section-title" style="color:#a5b4fc">🧠 About the Model</div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;font-size:0.82rem;color:#8B949E;line-height:1.7">
+            <div>
+              <span style="color:#22d3ee;font-family:monospace;font-weight:700">Gamma–Poisson Filter</span><br>
+              Each team has latent attack α and defence δ drawn from Gamma posteriors.
+              Goals are Poisson-distributed: λ_H = α_h/δ_a × e<sup>η</sup>.
+              Bayesian conjugate updates after every match.
+            </div>
+            <div>
+              <span style="color:#a78bfa;font-family:monospace;font-weight:700">Forgetting Factor φ=0.975</span><br>
+              Applied after each match to inflate posterior variance,
+              letting team strength drift over time. Recent form
+              carries more weight than early-season results.
+            </div>
+            <div>
+              <span style="color:#f59e0b;font-family:monospace;font-weight:700">Monte Carlo Completion</span><br>
+              {N_SIM_SEASON:,} simulations of the remaining {n_remaining} fixtures.
+              Each sim draws team strengths from posterior Gammas,
+              samples Poisson goals, and records final standings.
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-title">📊 Predicted Final Table — 2025/26</div>
+          <div style="display:grid;grid-template-columns:1.1fr 0.9fr;gap:24px;align-items:start">
+            <table class="ptable">
+              <thead><tr>
+                <th style="text-align:center">Pos</th>
+                <th>Club</th>
+                <th style="text-align:center">Move</th>
+                <th style="text-align:center">Cur Pts</th>
+                <th style="text-align:center">Proj Pts</th>
+                <th style="text-align:center">±Pos</th>
+                <th style="text-align:center">Top 4</th>
+                <th style="text-align:center">Top 6</th>
+                <th style="text-align:center">Rel</th>
+              </tr></thead>
+              <tbody>{_table_rows}</tbody>
+            </table>
+            <div>
+              <img class="chart-img" src="data:image/png;base64,{_b64_a}" />
+              <div style="font-size:0.7rem;color:#8B949E;margin-top:8px;font-family:monospace">
+                <b style="color:#E6EDF3">Bold</b> = predicted by someone &nbsp;·&nbsp;
+                Proj Pts = mean across {N_SIM_SEASON:,} sims &nbsp;·&nbsp;
+                ±Pos = std dev of final position
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-title">🏆 Projected Final Leaderboard (if season ends as predicted)</div>
+          <div class="proj-highlight">
+            <span style="font-size:0.8rem;color:#a5b4fc;font-family:monospace">
+              📌 These scores apply the <em>same scoring rules</em> to the model's predicted final table.
+              They show where each person is likely to finish if the SSM forecast is correct.
+            </span>
+          </div>
+          {_proj_lb}
+        </div>
+
+        <div class="section-title">📋 Projected Pick-by-pick Breakdown</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-bottom:20px">
+          {_proj_cards}
+        </div>
+
+        <div class="card">
+          <div class="section-title">📡 Team Strength Ratings (Posterior Means)</div>
+          <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:24px;align-items:start">
+            <table class="ptable">
+              <thead><tr>
+                <th style="text-align:center">#</th><th>Team</th>
+                <th style="text-align:center">Attack α</th>
+                <th style="text-align:center">Defence δ</th>
+                <th style="text-align:center">Net (α/δ)</th>
+              </tr></thead>
+              <tbody>{_ratings_rows}</tbody>
+            </table>
+            <div>
+              <img class="chart-img" src="data:image/png;base64,{_b64_b}" />
+              <div style="font-size:0.7rem;color:#8B949E;margin-top:8px;font-family:monospace">
+                Attack α: expected goals scored vs avg defence<br>
+                Defence δ: expected goals conceded vs avg attack (lower = better)<br>
+                Net = α/δ (higher = stronger team overall) &nbsp;·&nbsp; <b style="color:#E6EDF3">Bold</b> = predicted team
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <details style="margin-top:8px">
+          <summary>📖 Model details & caveats</summary>
+          <div class="card" style="margin-top:10px;font-size:0.83rem;color:#8B949E;line-height:1.8">
+            <p><b style="color:#E6EDF3">Bayesian State-Space Model</b> (Ridall, Titman & Pettitt, 2024 — JRSS Series C).</p>
+            <p>The model tracks each team's latent <em>attack strength α</em> and <em>defence weakness δ</em>
+            as Gamma distributions updated sequentially after every match via the conjugate Gamma-Poisson relationship.
+            Home advantage η ≈ 0.26 (≈ 1.30× goal multiplier) is held fixed.</p>
+            <p>The <em>mean-field approximation</em> updates each team's parameters independently
+            using posterior means of opponent strengths — avoiding MCMC while retaining accuracy.</p>
+            <p><b style="color:#E6EDF3">Caveats:</b> The model treats all remaining fixtures as equally uncertain and
+            does not account for injuries, suspensions, fixture congestion, or managerial changes.
+            Simulations assume team strengths stay constant for remaining fixtures (no further forgetting).
+            Projected scores are the expected outcome if the SSM point forecast is exactly right —
+            treat them as directional, not precise.</p>
+          </div>
+        </details>
       </div>
     </details>
     """)
