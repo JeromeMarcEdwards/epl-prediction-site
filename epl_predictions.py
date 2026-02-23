@@ -961,48 +961,6 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(COLORS, PREDICTIONS_2024, current_matchday_2024, current_table_2024, errors_2024,
-      fetched_at_2024, mo, ranked_2024, results_2024):
-    _err = f" · ⚠️ {'; '.join(errors_2024)}" if errors_2024 else ""
-    _gws = f"Matchday {current_matchday_2024}" if current_matchday_2024 != "?" else "Final"
-    _all_predicted_2024 = {t.lower().replace(" fc","").strip()
-                          for picks in PREDICTIONS_2024.values() for t in picks}
-    
-    _medals = ["🥇", "🥈", "🥉"]
-
-    def _lb_row_2024(i, p):
-        s = results_2024[p]; c = COLORS[p]
-        return f"""
-        <div class="lb-row" style="border-color:{c}55">
-          <span class="lb-medal">{_medals[i]}</span>
-          <span class="lb-name" style="color:{c}">{p}</span>
-          <span class="lb-detail">
-            <span>📏 dist: <b>+{s['dist']}</b></span>
-            <span>✅ top-6: <b>{s['top6']}</b></span>
-            <span>🎯 exact: <b>{s['exact']}</b></span>
-          </span>
-          <span class="lb-pts" style="color:{c}">{s['total']}</span>
-        </div>"""
-
-    mo.Html(f"""
-    <details>
-      <summary>🏆 2024/25 Season Results</summary>
-      <div style="margin-top:16px">
-        <div class="statusbar">
-          <span>Final Season · {fetched_at_2024}{_err}</span>
-          <span>{len(current_table_2024)} clubs &nbsp;·&nbsp; {_gws}</span>
-        </div>
-        <div class="card" style="margin-top:12px">
-          <div class="section-title">🏆 Leaderboard — 2024/25 Season</div>
-          {"".join(_lb_row_2024(i, p) for i, (p, _) in enumerate(ranked_2024))}
-        </div>
-      </div>
-    </details>
-    """)
-    return
-
-
-@app.cell(hide_code=True)
 def _(BG, CARD, COLORS, MUTED, TEXT, base64, gw_scores_2023, historical_2023, io, mo, pe, plt):
     # 2023-2024 score evolution chart
     _fig, _ax = plt.subplots(figsize=(12, 4), facecolor=BG)
@@ -1090,7 +1048,7 @@ def _(BG, CARD, COLORS, MUTED, TEXT, base64, gw_scores_2024, historical_2024, io
     plt.close(_fig); _buf.seek(0)
     _b64_2024 = base64.b64encode(_buf.read()).decode()
     
-    chart_2024 = f'<div class="card" style="margin-bottom:20px"><div class="section-title">� Score Evolution</div><img class="chart-img" src="data:image/png;base64,{_b64_2024}" /></div>'
+    chart_2024 = f'<div class="card" style="margin-bottom:20px"><div class="section-title">📈 Score Evolution</div><img class="chart-img" src="data:image/png;base64,{_b64_2024}" /></div>'
     return chart_2024
 
 
