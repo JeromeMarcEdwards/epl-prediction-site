@@ -507,548 +507,238 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2023, T6_BON,
     return (
         actual_pos_2023, best_md_2023, current_matchday_2023, current_table_2023, errors_2023,
         fetched_at_2023, gw_scores_2023, historical_2023, ranked_2023, results_2023,
-        historical_data, team_history, all_teams,
     )
 
 
-# ─── Historical Data Fetching for Multi-Season Analysis ──────────────────────────────────────
+# ─── Historical Data Fetching for Multi-Season Analysis ──────────────────────
 @app.cell(hide_code=True)
-def _(BASE, HEADERS, np, requests):
+def _(BASE, HEADERS, requests):
     """Fetch historical EPL data from 2000-2001 season onwards"""
-    
+
     def _api_historical(path, params=None):
         try:
             r = requests.get(f"{BASE}{path}", headers=HEADERS, params=params, timeout=15)
             if r.status_code == 200:
                 return r.json()
             return {}
-        except Exception as e:
+        except Exception:
             return {}
-    
-    # Fetch historical standings from 2000-2025
-    historical_data = {}
-    all_teams = set()
-    
-    for season in range(2000, 2026):
-        print(f"Fetching season {season}-{season+1}...")
-        standings_data = _api_historical("/competitions/PL/standings", {"season": season})
-        
-        season_teams = []
-        for s in standings_data.get("standings", []):
-            if s.get("type") == "TOTAL":
-                for t in s.get("table", []):
-                    team_name = t.get("team", {}).get("name", "")
-                    if team_name:
-                        season_teams.append({
-                            "season": season,
-                            "name": team_name,
-                            "position": t.get("position", 20),
-                            "points": t.get("points", 0),
-                            "goal_difference": t.get("goalDifference", 0),
-                            "goals_for": t.get("goalsFor", 0),
-                            "goals_against": t.get("goalsAgainst", 0),
-                            "played": t.get("playedGames", 0),
-                            "won": t.get("won", 0),
-                            "draw": t.get("draw", 0),
-                            "lost": t.get("lost", 0)
+
+    _historical_data = {}
+    _all_teams_set = set()
+
+    for _season in range(2000, 2026):
+        _standings_resp = _api_historical("/competitions/PL/standings", {"season": _season})
+        _season_teams = []
+        for _s in _standings_resp.get("standings", []):
+            if _s.get("type") == "TOTAL":
+                for _t in _s.get("table", []):
+                    _tname = _t.get("team", {}).get("name", "")
+                    if _tname:
+                        _season_teams.append({
+                            "season": _season,
+                            "name": _tname,
+                            "position": _t.get("position", 20),
+                            "points": _t.get("points", 0),
+                            "goal_difference": _t.get("goalDifference", 0),
+                            "goals_for": _t.get("goalsFor", 0),
+                            "goals_against": _t.get("goalsAgainst", 0),
+                            "played": _t.get("playedGames", 0),
+                            "won": _t.get("won", 0),
+                            "draw": _t.get("draw", 0),
+                            "lost": _t.get("lost", 0),
                         })
-                        all_teams.add(team_name)
+                        _all_teams_set.add(_tname)
                 break
-        
-        historical_data[season] = season_teams
-    
-    # Create team historical time series
-    team_history = {}
-    for team in sorted(all_teams):
-        team_data = []
-        for season in range(2000, 2026):
-            season_teams = historical_data.get(season, [])
-            team_season = next((t for t in season_teams if t["name"] == team), None)
-            if team_season:
-                team_data.append(team_season)
+        _historical_data[_season] = _season_teams
+
+    # Build per-team time series
+    _team_history = {}
+    for _tname in sorted(_all_teams_set):
+        _tdata = []
+        for _season in range(2000, 2026):
+            _match = next((t for t in _historical_data.get(_season, []) if t["name"] == _tname), None)
+            if _match:
+                _tdata.append(_match)
             else:
-                # Team wasn't in Premier League this season (promoted/relegated)
-                team_data.append({
-                    "season": season,
-                    "name": team,
-                    "position": None,  # Not in PL this season
-                    "points": 0,
-                    "goal_difference": 0,
-                    "goals_for": 0,
-                    "goals_against": 0,
-                    "played": 0,
-                    "won": 0,
-                    "draw": 0,
-                    "lost": 0
+                _tdata.append({
+                    "season": _season, "name": _tname, "position": None,
+                    "points": 0, "goal_difference": 0,
+                    "goals_for": 0, "goals_against": 0,
+                    "played": 0, "won": 0, "draw": 0, "lost": 0,
                 })
-        team_history[team] = team_data
-    
-    return historical_data, team_history, sorted(all_teams)
+        _team_history[_tname] = _tdata
+
+    historical_data = _historical_data
+    team_history = _team_history
+    all_teams = sorted(_all_teams_set)
+
+    return historical_data, team_history, all_teams
 
 
-# ─── NEW: Bayesian SSM computation cell ──────────────────────────────────────
+# ─── Multi-Season Bayesian Model for Team Evolution ──────────────────────────
 @app.cell(hide_code=True)
-def _(all_matches, current_table, np, PREDICTIONS, T6_BON, EX_BON):
-    """
-    Bayesian State-Space Model — Gamma-Poisson conjugate filter.
+def _(all_teams, np, team_history):
+    """Build multi-season Bayesian model to analyse team strength evolution"""
 
-    For each team i, we track latent attack alpha_i ~ Gamma(a_i, b_i)
-    and defence delta_i ~ Gamma(c_i, d_i).
+    _MIN_SEASONS = 3
 
-    After observing home goals H, away goals A:
-      Conjugate update (mean-field):
-        a_h += H,  b_h += E[1/delta_a] * exp(eta)
-        a_a += A,  b_a += E[1/delta_h]
-        c_h += A,  d_h += E[alpha_a] / exp(eta)
-        c_a += H,  d_a += E[alpha_h] * exp(eta)
+    _team_evolution = {}
 
-    State evolution: multiply shape/rate by phi after each match
-    (preserves mean, inflates variance -> tracks time-varying form).
-    """
-
-    # ── Hyperparameters ──────────────────────────────────────────────
-    PRIOR_SHAPE  = 4.0
-    PRIOR_RATE   = 4.0
-    PHI_WITHIN   = 0.975   # within-season forgetting factor
-    ETA          = 0.26    # home advantage (log scale)
-    N_SIM_SEASON = 5000    # MC simulations for season completion
-
-    # ── Identify all teams ──────────────────────────────────────────
-    ssm_teams = sorted({_t["name"] for _t in current_table})
-    n_teams   = len(ssm_teams)
-    _idx      = {_t: _ii for _ii, _t in enumerate(ssm_teams)}
-
-    # ── Initialise Gamma parameters ─────────────────────────────────
-    _a = np.full(n_teams, PRIOR_SHAPE)   # attack shape
-    _b = np.full(n_teams, PRIOR_RATE)    # attack rate
-    _c = np.full(n_teams, PRIOR_SHAPE)   # defence shape
-    _d = np.full(n_teams, PRIOR_RATE)    # defence rate
-
-    def _inv_mean(_ci, _di):
-        """E[1/X] for X ~ Gamma(c, d)"""
-        return _di / (_ci - 1) if _ci > 1 else _di / _ci
-
-    def _ssm_update(_hi, _ai, _hg, _ag):
-        """Conjugate mean-field update for one match."""
-        _C_H = _inv_mean(_c[_ai], _d[_ai]) * np.exp(ETA)
-        _C_A = _inv_mean(_c[_hi], _d[_hi])
-        _D_A = (_a[_hi] / _b[_hi]) * np.exp(ETA)
-        _D_H = (_a[_ai] / _b[_ai]) / np.exp(ETA)
-
-        # Attack updates
-        _a[_hi] += _hg;  _b[_hi] += _C_H
-        _a[_ai] += _ag;  _b[_ai] += _C_A
-        # Defence updates
-        _c[_hi] += _ag;  _d[_hi] += _D_A
-        _c[_ai] += _hg;  _d[_ai] += _D_H
-
-        # Forgetting (applied to involved teams)
-        for _fi in [_hi, _ai]:
-            _a[_fi] *= PHI_WITHIN;  _b[_fi] *= PHI_WITHIN
-            _c[_fi] *= PHI_WITHIN;  _d[_fi] *= PHI_WITHIN
-
-    # ── Run filter over all finished 2025-26 matches ─────────────────
-    _finished = sorted(
-        [_m for _m in all_matches if _m.get("status") == "FINISHED"],
-        key=lambda _m: _m.get("utcDate", "")
-    )
-    for _m in _finished:
-        _hn = _m["homeTeam"]["name"]
-        _an = _m["awayTeam"]["name"]
-        _hg = _m["score"]["fullTime"].get("home")
-        _ag = _m["score"]["fullTime"].get("away")
-        if _hn in _idx and _an in _idx and _hg is not None and _ag is not None:
-            _ssm_update(_idx[_hn], _idx[_an], int(_hg), int(_ag))
-
-    # ── Remaining fixtures ───────────────────────────────────────────
-    _remaining = [
-        _m for _m in all_matches
-        if _m.get("status") in ("SCHEDULED", "TIMED")
-        and _m["homeTeam"]["name"] in _idx
-        and _m["awayTeam"]["name"] in _idx
-    ]
-    n_remaining = len(_remaining)
-
-    # ── Current points from actual table ────────────────────────────
-    _current_pts = {}
-    _current_gf  = {}
-    _current_gd  = {}
-    for _t in current_table:
-        _current_pts[_t["name"]] = _t["pts"]
-        _current_gf[_t["name"]]  = _t["gf"]
-        _current_gd[_t["name"]]  = _t.get("goalDifference", 0)
-
-    # ── Attack/defence means for rating table ────────────────────────
-    ssm_ratings = {}
-    for _team in ssm_teams:
-        _i   = _idx[_team]
-        _atk = _a[_i] / _b[_i]
-        _dfc = _c[_i] / _d[_i]
-        ssm_ratings[_team] = {
-            "atk": round(_atk, 3),
-            "def": round(_dfc, 3),
-            "net": round(_atk / _dfc, 3),
-            "atk_sd": round(np.sqrt(_a[_i] / _b[_i]**2), 3),
-            "def_sd": round(np.sqrt(_c[_i] / _d[_i]**2), 3),
-        }
-
-    # ── Monte Carlo season completion ────────────────────────────────
-    _rng = np.random.default_rng(42)
-
-    # Pre-draw Gamma samples — shape: (N_SIM_SEASON, n_teams)
-    _atk_samples = _rng.gamma(_a, 1.0 / _b, size=(N_SIM_SEASON, n_teams))
-    _def_samples = _rng.gamma(_c, 1.0 / _d, size=(N_SIM_SEASON, n_teams))
-    _atk_samples = np.clip(_atk_samples, 0.05, 10)
-    _def_samples = np.clip(_def_samples, 0.05, 10)
-
-    # Simulate each remaining fixture across all sims
-    _sim_pts = {_t: np.full(N_SIM_SEASON, _current_pts.get(_t, 0), dtype=float) for _t in ssm_teams}
-    _sim_gd  = {_t: np.full(N_SIM_SEASON, _current_gd.get(_t, 0),  dtype=float) for _t in ssm_teams}
-    _sim_gf  = {_t: np.full(N_SIM_SEASON, _current_gf.get(_t, 0),  dtype=float) for _t in ssm_teams}
-
-    for _m in _remaining:
-        _hn2  = _m["homeTeam"]["name"]
-        _an2  = _m["awayTeam"]["name"]
-        _hi2  = _idx[_hn2]
-        _ai2  = _idx[_an2]
-
-        _lam_H = _atk_samples[:, _hi2] / _def_samples[:, _ai2] * np.exp(ETA)
-        _lam_A = _atk_samples[:, _ai2] / _def_samples[:, _hi2]
-        _lam_H = np.clip(_lam_H, 0.05, 10)
-        _lam_A = np.clip(_lam_A, 0.05, 10)
-
-        _hg_sim = _rng.poisson(_lam_H)
-        _ag_sim = _rng.poisson(_lam_A)
-
-        _home_win = _hg_sim > _ag_sim
-        _draw     = _hg_sim == _ag_sim
-        _away_win = _ag_sim > _hg_sim
-
-        _sim_pts[_hn2] += np.where(_home_win, 3, np.where(_draw, 1, 0))
-        _sim_pts[_an2] += np.where(_away_win, 3, np.where(_draw, 1, 0))
-        _sim_gd[_hn2]  += (_hg_sim - _ag_sim).astype(float)
-        _sim_gd[_an2]  += (_ag_sim - _hg_sim).astype(float)
-        _sim_gf[_hn2]  += _hg_sim.astype(float)
-        _sim_gf[_an2]  += _ag_sim.astype(float)
-
-    # ── Final position distributions from simulations ────────────────
-    _team_list = ssm_teams
-
-    _pts_mat  = np.stack([_sim_pts[_t] for _t in _team_list], axis=1)
-    _gd_mat   = np.stack([_sim_gd[_t]  for _t in _team_list], axis=1)
-    _gf_mat   = np.stack([_sim_gf[_t]  for _t in _team_list], axis=1)
-
-    _sort_key = np.stack([-_pts_mat, -_gd_mat, -_gf_mat], axis=2)
-
-    _ranks = np.zeros((N_SIM_SEASON, n_teams), dtype=int)
-    for _sim_i in range(N_SIM_SEASON):
-        # Sort by points (desc), then goal difference (desc), then goals scored (desc)
-        _order = np.lexsort((_sort_key[_sim_i, :, 2], _sort_key[_sim_i, :, 1], _sort_key[_sim_i, :, 0]))
-        _ranks[_sim_i, _order] = np.arange(1, n_teams + 1)
-
-    _mean_pos  = _ranks.mean(axis=0)
-    _std_pos   = _ranks.std(axis=0)
-    _top1_prob = (_ranks == 1).mean(axis=0)
-    _top4_prob = (_ranks <= 4).mean(axis=0)
-    _top6_prob = (_ranks <= 6).mean(axis=0)
-    _rel_prob  = (_ranks >= 18).mean(axis=0)
-    _mean_pts  = np.array([_sim_pts[_t].mean() for _t in _team_list])
-
-    # Build predicted final table (sorted by mean_pos)
-    _pred_table_order = np.argsort(_mean_pos)
-    predicted_final_table = []
-    for _rank_i, _ti in enumerate(_pred_table_order):
-        _team = _team_list[_ti]
-        _current_pos = next((_t["pos"] for _t in current_table if _t["name"] == _team), _rank_i + 1)
-        predicted_final_table.append({
-            "pred_pos":  _rank_i + 1,
-            "curr_pos":  _current_pos,
-            "name":      _team,
-            "mean_pos":  round(float(_mean_pos[_ti]), 1),
-            "std_pos":   round(float(_std_pos[_ti]), 1),
-            "mean_pts":  round(float(_mean_pts[_ti]), 1),
-            "curr_pts":  _current_pts.get(_team, 0),
-            "top1_pct":  round(float(_top1_prob[_ti]) * 100, 1),
-            "top4_pct":  round(float(_top4_prob[_ti]) * 100, 1),
-            "top6_pct":  round(float(_top6_prob[_ti]) * 100, 1),
-            "rel_pct":   round(float(_rel_prob[_ti]) * 100, 1),
-        })
-
-    # ── Predicted final positions dict (for scoring) ─────────────────
-    pred_pos_dict = {_row["name"]: _row["pred_pos"] for _row in predicted_final_table}
-
-    # ── Apply scoring formula to predicted final table ───────────────
-    def _fuzzy_ssm(_team, _pos_dict):
-        if _team in _pos_dict:
-            return _pos_dict[_team]
-        _tl = _team.lower().replace(" fc", "").strip()
-        for _k, _v in _pos_dict.items():
-            _kl = _k.lower().replace(" fc", "").strip()
-            if _tl in _kl or _kl in _tl:
-                return _v
-            if len(set(_tl.split()) & set(_kl.split())) >= 2:
-                return _v
-        return None
-
-    def _score_ssm(_picks, _pos_dict):
-        _top6 = {_t for _t, _pp in _pos_dict.items() if _pp <= 6}
-        _dt = _tb = _eb = 0
-        _bk = []
-        for _pr, _team in enumerate(_picks, 1):
-            _ar = _fuzzy_ssm(_team, _pos_dict)
-            if _ar is None:
-                _bk.append({"team": _team, "pred": _pr, "proj": "?", "dist": 0, "in_top6": False, "exact": False})
-                continue
-            _dist  = abs(_pr - _ar)
-            _in_t6 = any(_team.lower().replace(" fc","") in _t.lower() or _t.lower() in _team.lower() for _t in _top6)
-            _exact = (_pr == _ar)
-            _dt += _dist
-            if _in_t6: _tb += T6_BON
-            if _exact: _eb += EX_BON
-            _bk.append({"team": _team, "pred": _pr, "proj": _ar, "dist": _dist, "in_top6": _in_t6, "exact": _exact})
-        return {"dist": _dt, "top6": _tb, "exact": _eb, "total": _dt + _tb + _eb, "breakdown": _bk}
-
-    projected_scores = {_p: _score_ssm(_picks, pred_pos_dict) for _p, _picks in PREDICTIONS.items()}
-    projected_ranked = sorted(projected_scores.items(), key=lambda _x: _x[1]["total"])
-
-    return (
-        N_SIM_SEASON, n_remaining, pred_pos_dict, predicted_final_table,
-        projected_ranked, projected_scores, ssm_ratings, ssm_teams,
-    )
-
-
-# ─── Multi-Season Bayesian Model for Team Evolution ──────────────────────────────────────
-@app.cell(hide_code=True)
-def _(historical_data, team_history, all_teams, np):
-    """Build multi-season Bayesian model to analyze team strength evolution"""
-    
-    # Hyperparameters for multi-season analysis
-    PHI_BETWEEN = 0.85  # between-season forgetting factor (higher = more change between seasons)
-    MIN_SEASONS = 3   # minimum seasons needed for reliable analysis
-    
-    # Calculate team strength evolution for each team
-    team_evolution = {}
-    
-    for team in all_teams:
-        team_data = team_history[team]
-        
-        # Filter out seasons where team wasn't in PL
-        valid_seasons = [s for s in team_data if s["position"] is not None]
-        
-        if len(valid_seasons) < MIN_SEASONS:
+    for _tm in all_teams:
+        _tdata = team_history[_tm]
+        _valid = [s for s in _tdata if s["position"] is not None]
+        if len(_valid) < _MIN_SEASONS:
             continue
-            
-        # Extract performance metrics over time
-        seasons = [s["season"] for s in valid_seasons]
-        positions = [s["position"] for s in valid_seasons]
-        points = [s["points"] for s in valid_seasons]
-        goal_diffs = [s["goal_difference"] for s in valid_seasons]
-        
-        # Calculate attack/defense strength proxies
-        # Attack: goals scored per game
-        attack_strength = [s["goals_for"] / max(s["played"], 1) for s in valid_seasons]
-        # Defense: goals conceded per game (lower is better)
-        defense_strength = [s["goals_against"] / max(s["played"], 1) for s in valid_seasons]
-        
-        # Bayesian trend analysis using simple linear regression with uncertainty
-        n_seasons = len(seasons)
-        
-        # Position trend (lower is better)
-        pos_coeffs = np.polyfit(seasons, positions, 1)
-        pos_trend = pos_coeffs[0]  # negative = improving
-        pos_uncertainty = np.std([p - (pos_coeffs[0] * s + pos_coeffs[1]) for s, p in zip(seasons, positions)])
-        
-        # Points trend (higher is better)
-        pts_coeffs = np.polyfit(seasons, points, 1)
-        pts_trend = pts_coeffs[0]  # positive = improving
-        pts_uncertainty = np.std([p - (pts_coeffs[0] * s + pts_coeffs[1]) for s, p in zip(seasons, points)])
-        
-        # Attack trend (higher is better)
-        atk_coeffs = np.polyfit(seasons, attack_strength, 1)
-        atk_trend = atk_coeffs[0]
-        atk_uncertainty = np.std([a - (atk_coeffs[0] * s + atk_coeffs[1]) for s, a in zip(seasons, attack_strength)])
-        
-        # Defense trend (lower is better, so negative trend = improving)
-        def_coeffs = np.polyfit(seasons, defense_strength, 1)
-        def_trend = def_coeffs[0]
-        def_uncertainty = np.std([d - (def_coeffs[0] * s + def_coeffs[1]) for s, d in zip(seasons, defense_strength)])
-        
-        # Project future performance (next 3 seasons)
-        future_seasons = [2025, 2026, 2027]
-        proj_positions = []
-        proj_points = []
-        proj_attack = []
-        proj_defense = []
-        
-        for fs in future_seasons:
-            # Position projection with uncertainty
-            proj_pos = pos_coeffs[0] * fs + pos_coeffs[1]
-            proj_pos_std = pos_uncertainty * np.sqrt(1 + (fs - seasons[-1])**2 / np.var(seasons))
-            
-            # Points projection
-            proj_pts = pts_coeffs[0] * fs + pts_coeffs[1]
-            proj_pts_std = pts_uncertainty * np.sqrt(1 + (fs - seasons[-1])**2 / np.var(seasons))
-            
-            # Attack/Defense projections
-            proj_atk = atk_coeffs[0] * fs + atk_coeffs[1]
-            proj_atk_std = atk_uncertainty * np.sqrt(1 + (fs - seasons[-1])**2 / np.var(seasons))
-            
-            proj_def = def_coeffs[0] * fs + def_coeffs[1]
-            proj_def_std = def_uncertainty * np.sqrt(1 + (fs - seasons[-1])**2 / np.var(seasons))
-            
-            proj_positions.append({
-                "season": fs,
-                "position": max(1, min(20, int(round(proj_pos)))),
-                "position_std": proj_pos_std,
-                "points": max(0, int(round(proj_pts))),
-                "points_std": proj_pts_std,
-                "attack": proj_atk,
-                "attack_std": proj_atk_std,
-                "defense": proj_def,
-                "defense_std": proj_def_std
+
+        _seasons_list  = [s["season"]   for s in _valid]
+        _positions_list = [s["position"] for s in _valid]
+        _points_list   = [s["points"]   for s in _valid]
+        _attack_list   = [s["goals_for"]  / max(s["played"], 1) for s in _valid]
+        _defense_list  = [s["goals_against"] / max(s["played"], 1) for s in _valid]
+
+        _pos_c  = np.polyfit(_seasons_list, _positions_list, 1)
+        _pts_c  = np.polyfit(_seasons_list, _points_list,    1)
+        _atk_c  = np.polyfit(_seasons_list, _attack_list,    1)
+        _def_c  = np.polyfit(_seasons_list, _defense_list,   1)
+
+        _pos_u  = np.std([p - (_pos_c[0]*s + _pos_c[1]) for s, p in zip(_seasons_list, _positions_list)])
+        _pts_u  = np.std([p - (_pts_c[0]*s + _pts_c[1]) for s, p in zip(_seasons_list, _points_list)])
+        _atk_u  = np.std([a - (_atk_c[0]*s + _atk_c[1]) for s, a in zip(_seasons_list, _attack_list)])
+        _def_u  = np.std([d - (_def_c[0]*s + _def_c[1]) for s, d in zip(_seasons_list, _defense_list)])
+
+        _var_s  = np.var(_seasons_list) if len(_seasons_list) > 1 else 1.0
+        _last_s = _seasons_list[-1]
+
+        _projections = []
+        for _fs in [2025, 2026, 2027]:
+            _extra = np.sqrt(1 + (_fs - _last_s)**2 / max(_var_s, 1e-9))
+            _projections.append({
+                "season": _fs,
+                "position":     max(1, min(20, int(round(_pos_c[0]*_fs + _pos_c[1])))),
+                "position_std": float(_pos_u * _extra),
+                "points":       max(0, int(round(_pts_c[0]*_fs + _pts_c[1]))),
+                "points_std":   float(_pts_u * _extra),
+                "attack":       float(_atk_c[0]*_fs + _atk_c[1]),
+                "attack_std":   float(_atk_u * _extra),
+                "defense":      float(_def_c[0]*_fs + _def_c[1]),
+                "defense_std":  float(_def_u * _extra),
             })
-        
-        team_evolution[team] = {
+
+        _team_evolution[_tm] = {
             "historical": {
-                "seasons": seasons,
-                "positions": positions,
-                "points": points,
-                "attack": attack_strength,
-                "defense": defense_strength
+                "seasons":   _seasons_list,
+                "positions": _positions_list,
+                "points":    _points_list,
+                "attack":    _attack_list,
+                "defense":   _defense_list,
             },
             "trends": {
-                "position_trend": pos_trend,
-                "points_trend": pts_trend,
-                "attack_trend": atk_trend,
-                "defense_trend": def_trend,
-                "position_uncertainty": pos_uncertainty,
-                "points_uncertainty": pts_uncertainty,
-                "attack_uncertainty": atk_uncertainty,
-                "defense_uncertainty": def_uncertainty
+                "position_trend":       float(_pos_c[0]),
+                "points_trend":         float(_pts_c[0]),
+                "attack_trend":         float(_atk_c[0]),
+                "defense_trend":        float(_def_c[0]),
+                "position_uncertainty": float(_pos_u),
+                "points_uncertainty":   float(_pts_u),
+                "attack_uncertainty":   float(_atk_u),
+                "defense_uncertainty":  float(_def_u),
             },
-            "projections": proj_positions,
+            "projections": _projections,
             "current_strength": {
-                "attack": attack_strength[-1] if attack_strength else 0,
-                "defense": defense_strength[-1] if defense_strength else 0,
-                "position": positions[-1] if positions else 20,
-                "points": points[-1] if points else 0
-            }
+                "attack":   _attack_list[-1]   if _attack_list   else 0,
+                "defense":  _defense_list[-1]  if _defense_list  else 0,
+                "position": _positions_list[-1] if _positions_list else 20,
+                "points":   _points_list[-1]   if _points_list   else 0,
+            },
         }
-    
-    return team_evolution
+
+    team_evolution = _team_evolution
+    return (team_evolution,)
 
 
-# ─── Multi-Season Visualization ─────────────────────────────────────────────────────
+# ─── Multi-Season Visualisation ──────────────────────────────────────────────
 @app.cell(hide_code=True)
-def _(BG, CARD, COLORS, MUTED, TEXT, base64, historical_data, io, matplotlib, 
-      mo, np, plt, team_evolution, team_history):
-    """Create visualizations for multi-season team analysis"""
-    
-    # Create team trajectory charts
+def _(BG, CARD, MUTED, TEXT, base64, io, np, plt, team_evolution):
+    """Create trajectory + attack/defence charts for multi-season analysis"""
+
+    # Pick top-8 teams by most-recent position
+    _teams_to_plot = sorted(
+        [td for td in team_evolution.values() if td["current_strength"]["position"] <= 8],
+        key=lambda x: x["current_strength"]["position"],
+    )
+    _colors_list = plt.cm.tab10(np.linspace(0, 1, max(len(_teams_to_plot), 1)))
+
+    # ── Chart 1: position trajectories ──────────────────────────────
     _fig_traj, _ax_traj = plt.subplots(figsize=(14, 8), facecolor=BG)
     _ax_traj.set_facecolor(CARD)
-    
-    # Select top 8 teams by current position for trajectory plot
-    teams_to_plot = []
-    for team_data in team_evolution.values():
-        if team_data["current_strength"]["position"] <= 8:
-            teams_to_plot.append(team_data)
-    
-    teams_to_plot = sorted(teams_to_plot, key=lambda x: x["current_strength"]["position"])
-    
-    colors_list = plt.cm.tab10(np.linspace(0, 1, len(teams_to_plot)))
-    
-    # Plot position trajectories
-    for i, team_data in enumerate(teams_to_plot):
-        team_name = team_data["historical"]["seasons"][-1]
-        seasons = team_data["historical"]["seasons"]
-        positions = team_data["historical"]["positions"]
-        
-        # Filter out None positions (seasons not in PL)
-        valid_data = [(s, p) for s, p in zip(seasons, positions) if p is not None]
-        if valid_data:
-            plot_seasons, plot_positions = zip(*valid_data)
-            _ax_traj.plot(plot_seasons, plot_positions, 
-                        color=colors_list[i], linewidth=2, alpha=0.8, 
-                        label=team_name.replace(" FC", "").replace(" United", ""))
-            
-            # Add trend line
-            trend_coeffs = np.polyfit(plot_seasons, plot_positions, 1)
-            trend_line = [trend_coeffs[0] * s + trend_coeffs[1] for s in plot_seasons]
-            _ax_traj.plot(plot_seasons, trend_line, 
-                        color=colors_list[i], linewidth=1, alpha=0.4, linestyle='--')
-    
+
+    for _ci, _td in enumerate(_teams_to_plot):
+        _slist = _td["historical"]["seasons"]
+        _plist = _td["historical"]["positions"]
+        _label = list(team_evolution.keys())[
+            list(team_evolution.values()).index(_td)
+        ].replace(" FC", "").replace(" United", "")
+        _valid = [(s, p) for s, p in zip(_slist, _plist) if p is not None]
+        if _valid:
+            _vs, _vp = zip(*_valid)
+            _ax_traj.plot(_vs, _vp, color=_colors_list[_ci], linewidth=2, alpha=0.8, label=_label)
+            _tc = np.polyfit(_vs, _vp, 1)
+            _ax_traj.plot(_vs, [_tc[0]*s + _tc[1] for s in _vs],
+                          color=_colors_list[_ci], linewidth=1, alpha=0.4, linestyle="--")
+
     _ax_traj.set_xlabel("Season", color=MUTED, fontsize=10)
     _ax_traj.set_ylabel("Final League Position", color=MUTED, fontsize=10)
-    _ax_traj.set_title("Team Position Trajectories (2000-2025)", color=TEXT, fontsize=12, pad=15)
-    _ax_traj.invert_yaxis()  # Lower position number is better
+    _ax_traj.set_title("Team Position Trajectories (2000–2025)", color=TEXT, fontsize=12, pad=15)
+    _ax_traj.invert_yaxis()
     _ax_traj.grid(True, alpha=0.3)
-    _ax_traj.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    
-    # Style the plot
-    for spine in _ax_traj.spines.values():
-        spine.set_edgecolor("#30363D")
-    
+    _ax_traj.legend(bbox_to_anchor=(1.05, 1), loc="upper left", labelcolor=TEXT, fontsize=8,
+                    facecolor=CARD, edgecolor="#30363D")
+    for _sp in _ax_traj.spines.values(): _sp.set_edgecolor("#30363D")
     _ax_traj.tick_params(colors=MUTED)
-    
-    # Convert to base64
+
     _buf_traj = io.BytesIO()
-    _fig_traj.savefig(_buf_traj, format='png', dpi=100, bbox_inches='tight', 
-                    facecolor=BG, edgecolor='none')
-    _buf_traj.seek(0)
-    _traj_b64 = base64.b64encode(_buf_traj.getvalue()).decode()
-    
-    # Create attack/defense evolution chart
-    _fig_strength, _ax_strength = plt.subplots(2, 1, figsize=(14, 10), facecolor=BG)
-    _fig_strength.suptitle("Team Strength Evolution (Attack vs Defense)", color=TEXT, fontsize=14)
-    
-    for i, team_data in enumerate(teams_to_plot[:6]):  # Top 6 teams
-        team_name = team_data["historical"]["seasons"][-1]
-        seasons = team_data["historical"]["seasons"]
-        attack = team_data["historical"]["attack"]
-        defense = team_data["historical"]["defense"]
-        
-        # Filter valid data
-        valid_data = [(s, a, d) for s, a, d in zip(seasons, attack, defense) 
-                    if s is not None and a is not None and d is not None]
-        if valid_data:
-            plot_seasons, plot_attack, plot_defense = zip(*valid_data)
-            
-            # Attack subplot
-            _ax_strength[0].plot(plot_seasons, plot_attack, 
-                                color=colors_list[i], linewidth=2, alpha=0.8,
-                                label=team_name.replace(" FC", ""))
-            
-            # Defense subplot (inverted - lower is better)
-            _ax_strength[1].plot(plot_seasons, plot_defense, 
-                                color=colors_list[i], linewidth=2, alpha=0.8,
-                                label=team_name.replace(" FC", ""))
-    
-    _ax_strength[0].set_ylabel("Goals Scored Per Game", color=MUTED, fontsize=10)
-    _ax_strength[0].set_title("Attack Strength Evolution", color=TEXT, fontsize=11)
-    _ax_strength[0].grid(True, alpha=0.3)
-    _ax_strength[0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    
-    _ax_strength[1].set_ylabel("Goals Conceded Per Game", color=MUTED, fontsize=10)
-    _ax_strength[1].set_title("Defense Strength Evolution", color=TEXT, fontsize=11)
-    _ax_strength[1].invert_yaxis()  # Lower is better
-    _ax_strength[1].grid(True, alpha=0.3)
-    _ax_strength[1].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    
-    for ax in _ax_strength:
-        ax.set_xlabel("Season", color=MUTED, fontsize=10)
-        ax.tick_params(colors=MUTED)
-        for spine in ax.spines.values():
-            spine.set_edgecolor("#30363D")
-    
-    # Convert to base64
-    _buf_strength = io.BytesIO()
-    _fig_strength.savefig(_buf_strength, format='png', dpi=100, bbox_inches='tight',
-                       facecolor=BG, edgecolor='none')
-    _buf_strength.seek(0)
-    _strength_b64 = base64.b64encode(_buf_strength.getvalue()).decode()
-    
-    return _traj_b64, _strength_b64
+    _fig_traj.savefig(_buf_traj, format="png", dpi=100, bbox_inches="tight", facecolor=BG, edgecolor="none")
+    plt.close(_fig_traj); _buf_traj.seek(0)
+    traj_b64 = base64.b64encode(_buf_traj.getvalue()).decode()
+
+    # ── Chart 2: attack / defence evolution ─────────────────────────
+    _fig_str, (_ax_atk, _ax_def) = plt.subplots(2, 1, figsize=(14, 10), facecolor=BG)
+    _fig_str.suptitle("Team Strength Evolution (Attack vs Defence)", color=TEXT, fontsize=14)
+
+    for _ci, _td in enumerate(_teams_to_plot[:6]):
+        _slist = _td["historical"]["seasons"]
+        _alist = _td["historical"]["attack"]
+        _dlist = _td["historical"]["defense"]
+        _label = list(team_evolution.keys())[
+            list(team_evolution.values()).index(_td)
+        ].replace(" FC", "")
+        _valid3 = [(s, a, d) for s, a, d in zip(_slist, _alist, _dlist)
+                   if s is not None and a is not None and d is not None]
+        if _valid3:
+            _vs3, _va3, _vd3 = zip(*_valid3)
+            _ax_atk.plot(_vs3, _va3, color=_colors_list[_ci], linewidth=2, alpha=0.8, label=_label)
+            _ax_def.plot(_vs3, _vd3, color=_colors_list[_ci], linewidth=2, alpha=0.8, label=_label)
+
+    for _ax, _ylabel, _title, _inv in [
+        (_ax_atk, "Goals Scored Per Game",   "Attack Strength Evolution",  False),
+        (_ax_def, "Goals Conceded Per Game",  "Defence Strength Evolution", True),
+    ]:
+        _ax.set_ylabel(_ylabel, color=MUTED, fontsize=10)
+        _ax.set_title(_title, color=TEXT, fontsize=11)
+        _ax.set_xlabel("Season", color=MUTED, fontsize=10)
+        _ax.tick_params(colors=MUTED)
+        _ax.grid(True, alpha=0.3)
+        _ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", labelcolor=TEXT,
+                   fontsize=8, facecolor=CARD, edgecolor="#30363D")
+        for _sp in _ax.spines.values(): _sp.set_edgecolor("#30363D")
+        if _inv: _ax.invert_yaxis()
+
+    _buf_str = io.BytesIO()
+    _fig_str.savefig(_buf_str, format="png", dpi=100, bbox_inches="tight", facecolor=BG, edgecolor="none")
+    plt.close(_fig_str); _buf_str.seek(0)
+    strength_b64 = base64.b64encode(_buf_str.getvalue()).decode()
+
+    return strength_b64, traj_b64
 
 
 @app.cell(hide_code=True)
@@ -1654,47 +1344,227 @@ def _(
     return
 
 
-# ─── NEW: Bayesian SSM collapsible section ────────────────────────────────────
+# ─── Bayesian SSM computation cell ───────────────────────────────────────────
+@app.cell(hide_code=True)
+def _(EX_BON, PREDICTIONS, T6_BON, all_matches, current_table, np):
+    """
+    Bayesian State-Space Model — Gamma-Poisson conjugate filter.
+    """
+
+    _PRIOR_SHAPE  = 4.0
+    _PRIOR_RATE   = 4.0
+    _PHI_WITHIN   = 0.975
+    _ETA          = 0.26
+    N_SIM_SEASON  = 5000
+
+    _ssm_teams = sorted({_t["name"] for _t in current_table})
+    _n_teams   = len(_ssm_teams)
+    _idx       = {_t: _ii for _ii, _t in enumerate(_ssm_teams)}
+
+    _a = np.full(_n_teams, _PRIOR_SHAPE)
+    _b = np.full(_n_teams, _PRIOR_RATE)
+    _c = np.full(_n_teams, _PRIOR_SHAPE)
+    _d = np.full(_n_teams, _PRIOR_RATE)
+
+    def _inv_mean(_ci, _di):
+        return _di / (_ci - 1) if _ci > 1 else _di / _ci
+
+    def _ssm_update(_hi, _ai, _hg, _ag):
+        _C_H = _inv_mean(_c[_ai], _d[_ai]) * np.exp(_ETA)
+        _C_A = _inv_mean(_c[_hi], _d[_hi])
+        _D_A = (_a[_hi] / _b[_hi]) * np.exp(_ETA)
+        _D_H = (_a[_ai] / _b[_ai]) / np.exp(_ETA)
+        _a[_hi] += _hg;  _b[_hi] += _C_H
+        _a[_ai] += _ag;  _b[_ai] += _C_A
+        _c[_hi] += _ag;  _d[_hi] += _D_A
+        _c[_ai] += _hg;  _d[_ai] += _D_H
+        for _fi in [_hi, _ai]:
+            _a[_fi] *= _PHI_WITHIN;  _b[_fi] *= _PHI_WITHIN
+            _c[_fi] *= _PHI_WITHIN;  _d[_fi] *= _PHI_WITHIN
+
+    _finished = sorted(
+        [_m for _m in all_matches if _m.get("status") == "FINISHED"],
+        key=lambda _m: _m.get("utcDate", "")
+    )
+    for _m in _finished:
+        _hn = _m["homeTeam"]["name"]
+        _an = _m["awayTeam"]["name"]
+        _hg = _m["score"]["fullTime"].get("home")
+        _ag = _m["score"]["fullTime"].get("away")
+        if _hn in _idx and _an in _idx and _hg is not None and _ag is not None:
+            _ssm_update(_idx[_hn], _idx[_an], int(_hg), int(_ag))
+
+    _remaining = [
+        _m for _m in all_matches
+        if _m.get("status") in ("SCHEDULED", "TIMED")
+        and _m["homeTeam"]["name"] in _idx
+        and _m["awayTeam"]["name"] in _idx
+    ]
+    n_remaining = len(_remaining)
+
+    _current_pts = {_t["name"]: _t["pts"]               for _t in current_table}
+    _current_gf  = {_t["name"]: _t["gf"]                for _t in current_table}
+    _current_gd  = {_t["name"]: _t.get("goalDifference", 0) for _t in current_table}
+
+    ssm_ratings = {}
+    for _team in _ssm_teams:
+        _ii   = _idx[_team]
+        _atk  = _a[_ii] / _b[_ii]
+        _dfc  = _c[_ii] / _d[_ii]
+        ssm_ratings[_team] = {
+            "atk": round(_atk, 3),
+            "def": round(_dfc, 3),
+            "net": round(_atk / _dfc, 3),
+            "atk_sd": round(np.sqrt(_a[_ii] / _b[_ii]**2), 3),
+            "def_sd": round(np.sqrt(_c[_ii] / _d[_ii]**2), 3),
+        }
+
+    _rng = np.random.default_rng(42)
+    _atk_samples = _rng.gamma(_a, 1.0 / _b, size=(N_SIM_SEASON, _n_teams))
+    _def_samples = _rng.gamma(_c, 1.0 / _d, size=(N_SIM_SEASON, _n_teams))
+    _atk_samples = np.clip(_atk_samples, 0.05, 10)
+    _def_samples = np.clip(_def_samples, 0.05, 10)
+
+    _sim_pts = {_t: np.full(N_SIM_SEASON, _current_pts.get(_t, 0), dtype=float) for _t in _ssm_teams}
+    _sim_gd  = {_t: np.full(N_SIM_SEASON, _current_gd.get(_t, 0),  dtype=float) for _t in _ssm_teams}
+    _sim_gf  = {_t: np.full(N_SIM_SEASON, _current_gf.get(_t, 0),  dtype=float) for _t in _ssm_teams}
+
+    for _m in _remaining:
+        _hn2  = _m["homeTeam"]["name"]
+        _an2  = _m["awayTeam"]["name"]
+        _hi2  = _idx[_hn2]
+        _ai2  = _idx[_an2]
+        _lam_H = np.clip(_atk_samples[:, _hi2] / _def_samples[:, _ai2] * np.exp(_ETA), 0.05, 10)
+        _lam_A = np.clip(_atk_samples[:, _ai2] / _def_samples[:, _hi2], 0.05, 10)
+        _hg_sim = _rng.poisson(_lam_H)
+        _ag_sim = _rng.poisson(_lam_A)
+        _home_win = _hg_sim > _ag_sim
+        _draw     = _hg_sim == _ag_sim
+        _away_win = _ag_sim > _hg_sim
+        _sim_pts[_hn2] += np.where(_home_win, 3, np.where(_draw, 1, 0))
+        _sim_pts[_an2] += np.where(_away_win, 3, np.where(_draw, 1, 0))
+        _sim_gd[_hn2]  += (_hg_sim - _ag_sim).astype(float)
+        _sim_gd[_an2]  += (_ag_sim - _hg_sim).astype(float)
+        _sim_gf[_hn2]  += _hg_sim.astype(float)
+        _sim_gf[_an2]  += _ag_sim.astype(float)
+
+    _pts_mat  = np.stack([_sim_pts[_t] for _t in _ssm_teams], axis=1)
+    _gd_mat   = np.stack([_sim_gd[_t]  for _t in _ssm_teams], axis=1)
+    _gf_mat   = np.stack([_sim_gf[_t]  for _t in _ssm_teams], axis=1)
+    _sort_key = np.stack([-_pts_mat, -_gd_mat, -_gf_mat], axis=2)
+
+    _ranks = np.zeros((N_SIM_SEASON, _n_teams), dtype=int)
+    for _sim_i in range(N_SIM_SEASON):
+        _order = np.lexsort((_sort_key[_sim_i, :, 2], _sort_key[_sim_i, :, 1], _sort_key[_sim_i, :, 0]))
+        _ranks[_sim_i, _order] = np.arange(1, _n_teams + 1)
+
+    _mean_pos  = _ranks.mean(axis=0)
+    _std_pos   = _ranks.std(axis=0)
+    _top1_prob = (_ranks == 1).mean(axis=0)
+    _top4_prob = (_ranks <= 4).mean(axis=0)
+    _top6_prob = (_ranks <= 6).mean(axis=0)
+    _rel_prob  = (_ranks >= 18).mean(axis=0)
+    _mean_pts  = np.array([_sim_pts[_t].mean() for _t in _ssm_teams])
+
+    _pred_table_order = np.argsort(_mean_pos)
+    predicted_final_table = []
+    for _rank_i, _ti in enumerate(_pred_table_order):
+        _team = _ssm_teams[_ti]
+        _curr_pos = next((_t["pos"] for _t in current_table if _t["name"] == _team), _rank_i + 1)
+        predicted_final_table.append({
+            "pred_pos":  _rank_i + 1,
+            "curr_pos":  _curr_pos,
+            "name":      _team,
+            "mean_pos":  round(float(_mean_pos[_ti]), 1),
+            "std_pos":   round(float(_std_pos[_ti]), 1),
+            "mean_pts":  round(float(_mean_pts[_ti]), 1),
+            "curr_pts":  _current_pts.get(_team, 0),
+            "top1_pct":  round(float(_top1_prob[_ti]) * 100, 1),
+            "top4_pct":  round(float(_top4_prob[_ti]) * 100, 1),
+            "top6_pct":  round(float(_top6_prob[_ti]) * 100, 1),
+            "rel_pct":   round(float(_rel_prob[_ti]) * 100, 1),
+        })
+
+    pred_pos_dict = {_row["name"]: _row["pred_pos"] for _row in predicted_final_table}
+
+    def _fuzzy_ssm(_team, _pos_dict):
+        if _team in _pos_dict: return _pos_dict[_team]
+        _tl = _team.lower().replace(" fc", "").strip()
+        for _k, _v in _pos_dict.items():
+            _kl = _k.lower().replace(" fc", "").strip()
+            if _tl in _kl or _kl in _tl: return _v
+            if len(set(_tl.split()) & set(_kl.split())) >= 2: return _v
+        return None
+
+    def _score_ssm(_picks, _pos_dict):
+        _top6 = {_t for _t, _pp in _pos_dict.items() if _pp <= 6}
+        _dt = _tb = _eb = 0
+        _bk = []
+        for _pr, _team in enumerate(_picks, 1):
+            _ar = _fuzzy_ssm(_team, _pos_dict)
+            if _ar is None:
+                _bk.append({"team": _team, "pred": _pr, "proj": "?", "dist": 0, "in_top6": False, "exact": False})
+                continue
+            _dist  = abs(_pr - _ar)
+            _in_t6 = any(_team.lower().replace(" fc","") in _t.lower() or _t.lower() in _team.lower() for _t in _top6)
+            _exact = (_pr == _ar)
+            _dt += _dist
+            if _in_t6: _tb += T6_BON
+            if _exact: _eb += EX_BON
+            _bk.append({"team": _team, "pred": _pr, "proj": _ar, "dist": _dist, "in_top6": _in_t6, "exact": _exact})
+        return {"dist": _dt, "top6": _tb, "exact": _eb, "total": _dt + _tb + _eb, "breakdown": _bk}
+
+    projected_scores = {_p: _score_ssm(_picks, pred_pos_dict) for _p, _picks in PREDICTIONS.items()}
+    projected_ranked = sorted(projected_scores.items(), key=lambda _x: _x[1]["total"])
+    ssm_teams = _ssm_teams
+
+    return (
+        N_SIM_SEASON, n_remaining, pred_pos_dict, predicted_final_table,
+        projected_ranked, projected_scores, ssm_ratings, ssm_teams,
+    )
+
+
+# ─── Bayesian SSM display + Multi-Season collapsible ─────────────────────────
 @app.cell(hide_code=True)
 def _(
     BG, CARD, COLORS, MUTED, N_SIM_SEASON, PREDICTIONS, TEXT,
     base64, current_table, io, mo, mpatches, n_remaining,
     np, plt, pred_pos_dict, predicted_final_table,
     projected_ranked, projected_scores, ssm_ratings, ssm_teams,
+    strength_b64, traj_b64, team_evolution,
 ):
-    medals_ssm = ["🥇", "🥈", "🥉"]
+    _medals_ssm = ["🥇", "🥈", "🥉"]
 
-    # ── Chart 1: Predicted final table (horizontal bar, pts) ────────────
+    # ── Chart 1: Predicted final table bar chart ─────────────────────
     _fig_a, _ax_a = plt.subplots(figsize=(12, 6), facecolor=BG)
     _ax_a.set_facecolor(CARD)
     for _sp in _ax_a.spines.values(): _sp.set_edgecolor("#30363D")
 
-    _names_a  = [r["name"].replace(" FC","").replace(" United","").replace(" Hotspur","")
-                 for r in predicted_final_table]
-    _pts_a    = [r["mean_pts"] for r in predicted_final_table]
-    _curr_a   = [r["curr_pts"] for r in predicted_final_table]
-
+    _names_a = [r["name"].replace(" FC","").replace(" United","").replace(" Hotspur","")
+                for r in predicted_final_table]
+    _pts_a   = [r["mean_pts"] for r in predicted_final_table]
+    _curr_a  = [r["curr_pts"] for r in predicted_final_table]
     _colors_a = []
-    for r in predicted_final_table:
-        if r["pred_pos"] <= 4:    _colors_a.append("#60a5fa")
-        elif r["pred_pos"] == 5:  _colors_a.append("#f59e0b")
-        elif r["pred_pos"] == 6:  _colors_a.append("#8b5cf6")
-        elif r["pred_pos"] >= 18: _colors_a.append("#f87171")
-        else:                     _colors_a.append("#374151")
+    for _r in predicted_final_table:
+        if _r["pred_pos"] <= 4:    _colors_a.append("#60a5fa")
+        elif _r["pred_pos"] == 5:  _colors_a.append("#f59e0b")
+        elif _r["pred_pos"] == 6:  _colors_a.append("#8b5cf6")
+        elif _r["pred_pos"] >= 18: _colors_a.append("#f87171")
+        else:                      _colors_a.append("#374151")
 
-    _y_a = np.arange(len(_names_a))
-    _bars_a  = _ax_a.barh(_y_a, _pts_a[::-1], color=_colors_a[::-1], alpha=0.75, height=0.6, label="Projected final pts")
-    _ax_a.barh(_y_a, _curr_a[::-1], color=[c + "55" for c in _colors_a[::-1]], height=0.6, label="Current pts")
+    _y_a    = np.arange(len(_names_a))
+    _bars_a = _ax_a.barh(_y_a, _pts_a[::-1], color=_colors_a[::-1], alpha=0.75, height=0.6)
+    _ax_a.barh(_y_a, _curr_a[::-1], color=[_co + "55" for _co in _colors_a[::-1]], height=0.6)
 
-    for i, (bar, row) in enumerate(zip(_bars_a, reversed(predicted_final_table))):
-        _ax_a.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2,
-                   f"{row['mean_pts']:.0f} ± {row['std_pos']:.0f}  (top6: {row['top6_pct']:.0f}%)",
+    for _ib, (_bar, _row) in enumerate(zip(_bars_a, reversed(predicted_final_table))):
+        _ax_a.text(_bar.get_width() + 0.5, _bar.get_y() + _bar.get_height()/2,
+                   f"{_row['mean_pts']:.0f} ± {_row['std_pos']:.0f}  (top6: {_row['top6_pct']:.0f}%)",
                    va="center", color=MUTED, fontsize=7.5, fontfamily="monospace")
 
     _ax_a.set_yticks(_y_a)
-    _ax_a.set_yticklabels([n for n in reversed(_names_a)], fontsize=8.5, color=TEXT)
+    _ax_a.set_yticklabels(list(reversed(_names_a)), fontsize=8.5, color=TEXT)
     _ax_a.set_xlabel("Points", color=MUTED, fontsize=9, fontfamily="monospace")
-    _ax_a.set_title(f"Predicted Final Table — 2025/26  ({N_SIM_SEASON:,} simulations, {n_remaining} fixtures remaining)",
+    _ax_a.set_title(f"Predicted Final Table — 2025/26  ({N_SIM_SEASON:,} sims, {n_remaining} fixtures left)",
                     color=TEXT, fontsize=10, fontfamily="monospace", pad=12)
     _ax_a.tick_params(colors=MUTED)
     _ax_a.grid(axis="x", color="#30363D", lw=0.6, linestyle="--", alpha=0.6)
@@ -1702,9 +1572,7 @@ def _(
     _leg_a = [mpatches.Patch(color="#60a5fa", label="CL (1–4)"),
               mpatches.Patch(color="#f59e0b", label="EL (5)"),
               mpatches.Patch(color="#8b5cf6", label="Conf. (6)"),
-              mpatches.Patch(color="#f87171", label="Relegation (18–20)"),
-              mpatches.Patch(color="#4FC3C3", label="Projected pts"),
-              mpatches.Patch(color="#4FC3C3aa", label="Current pts")]
+              mpatches.Patch(color="#f87171", label="Relegation (18–20)")]
     _ax_a.legend(handles=_leg_a, loc="lower right", framealpha=0.2, labelcolor=TEXT,
                  fontsize=7, facecolor=CARD, edgecolor="#30363D", ncol=2)
     _fig_a.tight_layout(pad=1.5)
@@ -1713,52 +1581,39 @@ def _(
     plt.close(_fig_a); _buf_a.seek(0)
     _b64_a = base64.b64encode(_buf_a.read()).decode()
 
-    # ── Chart 2: Team strength ratings (attack vs defence scatter) ──────
+    # ── Chart 2: Attack vs Defence scatter ───────────────────────────
     _fig_b, _ax_b = plt.subplots(figsize=(10, 6), facecolor=BG)
     _ax_b.set_facecolor(CARD)
     for _sp in _ax_b.spines.values(): _sp.set_edgecolor("#30363D")
 
-    _all_pred_teams = {t.lower().replace(" fc","").strip() for picks in PREDICTIONS.values() for t in picks}
-    def _is_pred_team(name):
-        n = name.lower().replace(" fc","").strip()
-        return any(n in p or p in n for p in _all_pred_teams)
+    _all_pred_teams = {_t.lower().replace(" fc","").strip() for _picks in PREDICTIONS.values() for _t in _picks}
+    def _is_pred_team(_name):
+        _n = _name.lower().replace(" fc","").strip()
+        return any(_n in _pp or _pp in _n for _pp in _all_pred_teams)
 
-    for team, rat in ssm_ratings.items():
-        _is_p = _is_pred_team(team)
-        _col  = "#6366f1" if _is_p else "#374151"
+    for _team, _rat in ssm_ratings.items():
+        _is_p  = _is_pred_team(_team)
+        _col   = "#6366f1" if _is_p else "#374151"
         _alpha = 0.9 if _is_p else 0.5
         _size  = 90 if _is_p else 50
-        _ax_b.scatter(rat["atk"], rat["def"], color=_col, s=_size, alpha=_alpha, zorder=3,
+        _ax_b.scatter(_rat["atk"], _rat["def"], color=_col, s=_size, alpha=_alpha, zorder=3,
                       edgecolors="#ffffff33", linewidth=0.5)
-        _short = team.replace(" FC","").replace(" United","").replace(" Hotspur","").replace(" City","").replace("Brighton & Hove Albion","Brighton")
-        _ax_b.annotate(_short, (rat["atk"], rat["def"]),
+        _short = (_team.replace(" FC","").replace(" United","").replace(" Hotspur","")
+                       .replace(" City","").replace("Brighton & Hove Albion","Brighton"))
+        _ax_b.annotate(_short, (_rat["atk"], _rat["def"]),
                        textcoords="offset points", xytext=(5, 3),
                        fontsize=7, color=TEXT if _is_p else MUTED, fontfamily="monospace",
                        fontweight="bold" if _is_p else "normal")
 
-    # Quadrant lines at league average
-    _atk_avg = np.mean([r["atk"] for r in ssm_ratings.values()])
-    _def_avg = np.mean([r["def"] for r in ssm_ratings.values()])
+    _atk_avg = np.mean([_r["atk"] for _r in ssm_ratings.values()])
+    _def_avg = np.mean([_r["def"] for _r in ssm_ratings.values()])
     _ax_b.axvline(_atk_avg, color="#30363D", lw=1, linestyle="--", alpha=0.8)
     _ax_b.axhline(_def_avg, color="#30363D", lw=1, linestyle="--", alpha=0.8)
-
-    _ax_b.set_xlabel("Attack strength α  (higher = more dangerous)", color=MUTED, fontsize=9, fontfamily="monospace")
-    _ax_b.set_ylabel("Defence weakness δ  (lower = stronger defence)", color=MUTED, fontsize=9, fontfamily="monospace")
+    _ax_b.set_xlabel("Attack α  (higher = more dangerous)", color=MUTED, fontsize=9, fontfamily="monospace")
+    _ax_b.set_ylabel("Defence δ  (lower = stronger defence)", color=MUTED, fontsize=9, fontfamily="monospace")
     _ax_b.set_title("Bayesian SSM Team Ratings — Posterior Means", color=TEXT, fontsize=10, fontfamily="monospace", pad=10)
     _ax_b.tick_params(colors=MUTED, labelsize=8)
     _ax_b.grid(color="#30363D", lw=0.4, linestyle="--", alpha=0.4)
-
-    # Quadrant labels
-    for txt, x, y, ha in [
-        ("Strong attack\nStrong defence", 0.97, 0.03, "right"),
-        ("Weak attack\nStrong defence",   0.03, 0.03, "left"),
-        ("Strong attack\nWeak defence",   0.97, 0.97, "right"),
-        ("Weak attack\nWeak defence",     0.03, 0.97, "left"),
-    ]:
-        _ax_b.text(x, y, txt, transform=_ax_b.transAxes, fontsize=7,
-                   color="#ffffff22", ha=ha, va="top" if y > 0.5 else "bottom",
-                   fontfamily="monospace")
-
     _leg_b = [mpatches.Patch(color="#6366f1", label="Predicted team"),
               mpatches.Patch(color="#374151", label="Other team")]
     _ax_b.legend(handles=_leg_b, loc="upper right", framealpha=0.2, labelcolor=TEXT,
@@ -1769,94 +1624,122 @@ def _(
     plt.close(_fig_b); _buf_b.seek(0)
     _b64_b = base64.b64encode(_buf_b.read()).decode()
 
-    # ── Predicted final table HTML ───────────────────────────────────────
-    def _move_badge(curr, pred):
-        diff = curr - pred
-        if diff > 0:
-            return f'<span class="ssm-badge ssm-up">▲ {diff}</span>'
-        elif diff < 0:
-            return f'<span class="ssm-badge ssm-down">▼ {abs(diff)}</span>'
+    # ── Predicted final table HTML ────────────────────────────────────
+    def _move_badge(_curr, _pred):
+        _diff = _curr - _pred
+        if _diff > 0:  return f'<span class="ssm-badge ssm-up">▲ {_diff}</span>'
+        if _diff < 0:  return f'<span class="ssm-badge ssm-down">▼ {abs(_diff)}</span>'
         return '<span class="ssm-badge ssm-same">–</span>'
 
     _table_rows = ""
-    for row in predicted_final_table:
-        _short = row["name"].replace(" FC","").replace(" United","").replace(" Hotspur","")
-        _pos_col = ("color:#60a5fa;" if row["pred_pos"] <= 4 else
-                    "color:#f59e0b;" if row["pred_pos"] == 5 else
-                    "color:#8b5cf6;" if row["pred_pos"] == 6 else
-                    "color:#f87171;" if row["pred_pos"] >= 18 else "color:#8B949E;")
-        _hl = "background:#1a1f2e;" if row["pred_pos"] <= 6 else ""
-        _hl = "background:#2e1a1a;" if row["pred_pos"] >= 18 else _hl
-        _is_p = _is_pred_team(row["name"])
-        _bold = "font-weight:700;" if _is_p else ""
+    for _row in predicted_final_table:
+        _short = _row["name"].replace(" FC","").replace(" United","").replace(" Hotspur","")
+        _pos_col = ("color:#60a5fa;" if _row["pred_pos"] <= 4 else
+                    "color:#f59e0b;" if _row["pred_pos"] == 5 else
+                    "color:#8b5cf6;" if _row["pred_pos"] == 6 else
+                    "color:#f87171;" if _row["pred_pos"] >= 18 else "color:#8B949E;")
+        _hl = "background:#1a1f2e;" if _row["pred_pos"] <= 6 else ""
+        _hl = "background:#2e1a1a;" if _row["pred_pos"] >= 18 else _hl
+        _bold = "font-weight:700;" if _is_pred_team(_row["name"]) else ""
         _table_rows += (
             f'<tr style="{_hl}">'
-            f'<td style="text-align:center;{_pos_col}font-family:monospace;font-weight:700">{row["pred_pos"]}</td>'
+            f'<td style="text-align:center;{_pos_col}font-family:monospace;font-weight:700">{_row["pred_pos"]}</td>'
             f'<td style="{_bold}">{_short}</td>'
-            f'<td style="text-align:center">{_move_badge(row["curr_pos"], row["pred_pos"])}</td>'
-            f'<td style="text-align:center;color:#8B949E;font-family:monospace">{row["curr_pts"]}</td>'
-            f'<td style="text-align:center;font-family:monospace;font-weight:700;color:#E6EDF3">{row["mean_pts"]:.0f}</td>'
-            f'<td style="text-align:center;color:#8B949E;font-size:0.8rem">{row["std_pos"]:.1f}</td>'
-            f'<td style="text-align:center;color:#60a5fa">{row["top4_pct"]:.0f}%</td>'
-            f'<td style="text-align:center;color:#8b5cf6">{row["top6_pct"]:.0f}%</td>'
-            f'<td style="text-align:center;color:#f87171">{row["rel_pct"]:.0f}%</td>'
+            f'<td style="text-align:center">{_move_badge(_row["curr_pos"], _row["pred_pos"])}</td>'
+            f'<td style="text-align:center;color:#8B949E;font-family:monospace">{_row["curr_pts"]}</td>'
+            f'<td style="text-align:center;font-family:monospace;font-weight:700;color:#E6EDF3">{_row["mean_pts"]:.0f}</td>'
+            f'<td style="text-align:center;color:#8B949E;font-size:0.8rem">{_row["std_pos"]:.1f}</td>'
+            f'<td style="text-align:center;color:#60a5fa">{_row["top4_pct"]:.0f}%</td>'
+            f'<td style="text-align:center;color:#8b5cf6">{_row["top6_pct"]:.0f}%</td>'
+            f'<td style="text-align:center;color:#f87171">{_row["rel_pct"]:.0f}%</td>'
             f'</tr>'
         )
 
-    # ── Projected scores section ─────────────────────────────────────────
-    def _rc_proj(_b): return "exact" if _b["exact"] else ("top6" if _b["in_top6"] else "")
-    def _dc_proj(_b):
-        if _b["exact"]: return "d-good"
-        return "d-bad" if _b["dist"] > 3 else ("d-ok" if _b["dist"] > 0 else "d-good")
-
+    # ── Projected leaderboard ─────────────────────────────────────────
     _proj_lb = ""
-    for _i, (_p, _) in enumerate(projected_ranked):
-        _s = projected_scores[_p]; _c = COLORS[_p]
+    for _pi, (_pp, _) in enumerate(projected_ranked):
+        _ps = projected_scores[_pp]; _pc = COLORS[_pp]
         _proj_lb += f"""
-        <div class="lb-row" style="border-color:{_c}55">
-          <span class="lb-medal">{medals_ssm[_i]}</span>
-          <span class="lb-name" style="color:{_c}">{_p}</span>
+        <div class="lb-row" style="border-color:{_pc}55">
+          <span class="lb-medal">{_medals_ssm[_pi]}</span>
+          <span class="lb-name" style="color:{_pc}">{_pp}</span>
           <span class="lb-detail">
-            <span>📏 dist: <b>+{_s['dist']}</b></span>
-            <span>✅ top-6: <b>{_s['top6']}</b></span>
-            <span>🎯 exact: <b>{_s['exact']}</b></span>
+            <span>📏 dist: <b>+{_ps['dist']}</b></span>
+            <span>✅ top-6: <b>{_ps['top6']}</b></span>
+            <span>🎯 exact: <b>{_ps['exact']}</b></span>
           </span>
-          <span class="lb-pts" style="color:{_c}">{_s['total']}</span>
+          <span class="lb-pts" style="color:{_pc}">{_ps['total']}</span>
         </div>"""
 
+    def _rc_proj(_bx): return "exact" if _bx["exact"] else ("top6" if _bx["in_top6"] else "")
+    def _dc_proj(_bx):
+        if _bx["exact"]: return "d-good"
+        return "d-bad" if _bx["dist"] > 3 else ("d-ok" if _bx["dist"] > 0 else "d-good")
+
     _proj_cards = ""
-    for _i, (_p, _) in enumerate(projected_ranked):
-        _c = COLORS[_p]; _s = projected_scores[_p]
-        _rows = ""
-        for _b in _s["breakdown"]:
-            _short = _b["team"].replace(" FC","").replace(" United","").replace(" City"," C.").replace(" Hotspur","")
-            _rows += (f'<tr class="{_rc_proj(_b)}"><td style="color:#8B949E">{_b["pred"]}</td>'
-                     f'<td>{_short}</td><td style="text-align:center">{_b["proj"]}</td>'
-                     f'<td style="text-align:center" class="{_dc_proj(_b)}">{_b["dist"]}</td></tr>')
-        _legend = ('<tr><td colspan="4" style="padding-top:10px;font-size:0.7rem;color:#8B949E">'
-                  '<span style="background:#1a2e1a;padding:2px 8px;border-radius:4px;color:#FFD700;margin-right:8px">🎯 exact (−5)</span>'
-                  '<span style="background:#14232b;padding:2px 8px;border-radius:4px;color:#4FC3C3">✅ top-6 (−2)</span></td></tr>')
-        _proj_cards += (f'<div class="card" style="border-color:{_c}44">'
-                        f'<div class="section-title" style="color:{_c}">{medals_ssm[_i]} {_p} &nbsp;·&nbsp;'
-                        f'<span style="color:#E6EDF3;font-size:0.85rem">Projected: {_s["total"]} pts</span></div>'
+    for _pi, (_pp, _) in enumerate(projected_ranked):
+        _pc = COLORS[_pp]; _ps = projected_scores[_pp]
+        _prows = ""
+        for _bx in _ps["breakdown"]:
+            _bshort = _bx["team"].replace(" FC","").replace(" United","").replace(" City"," C.").replace(" Hotspur","")
+            _prows += (f'<tr class="{_rc_proj(_bx)}"><td style="color:#8B949E">{_bx["pred"]}</td>'
+                       f'<td>{_bshort}</td><td style="text-align:center">{_bx["proj"]}</td>'
+                       f'<td style="text-align:center" class="{_dc_proj(_bx)}">{_bx["dist"]}</td></tr>')
+        _plegend = ('<tr><td colspan="4" style="padding-top:10px;font-size:0.7rem;color:#8B949E">'
+                    '<span style="background:#1a2e1a;padding:2px 8px;border-radius:4px;color:#FFD700;margin-right:8px">🎯 exact (−5)</span>'
+                    '<span style="background:#14232b;padding:2px 8px;border-radius:4px;color:#4FC3C3">✅ top-6 (−2)</span></td></tr>')
+        _proj_cards += (f'<div class="card" style="border-color:{_pc}44">'
+                        f'<div class="section-title" style="color:{_pc}">{_medals_ssm[_pi]} {_pp} &nbsp;·&nbsp;'
+                        f'<span style="color:#E6EDF3;font-size:0.85rem">Projected: {_ps["total"]} pts</span></div>'
                         f'<table class="ptable"><thead><tr><th>#</th><th>Predicted</th>'
                         f'<th style="text-align:center">Proj. Pos</th><th style="text-align:center">Δ</th>'
-                        f'</tr></thead><tbody>{_rows}{_legend}</tbody></table></div>')
+                        f'</tr></thead><tbody>{_prows}{_plegend}</tbody></table></div>')
 
-    # ── SSM ratings table ────────────────────────────────────────────────
+    # ── SSM ratings table ─────────────────────────────────────────────
     _sorted_ratings = sorted(ssm_ratings.items(), key=lambda _x: -_x[1]["net"])
     _ratings_rows = ""
-    for _ri, (_team, _rat) in enumerate(_sorted_ratings):
-        _short = _team.replace(" FC","").replace(" United","").replace(" Hotspur","")
-        _is_p = _is_pred_team(_team)
-        _bold = "font-weight:700;" if _is_p else ""
-        _net_col = ("#22d3ee" if _ri < 4 else "#a78bfa" if _ri < 8 else "#f87171" if _ri >= 16 else "#94a3b8")
+    for _ri, (_rteam, _rat) in enumerate(_sorted_ratings):
+        _rshort = _rteam.replace(" FC","").replace(" United","").replace(" Hotspur","")
+        _rbold  = "font-weight:700;" if _is_pred_team(_rteam) else ""
+        _rnet_col = ("#22d3ee" if _ri < 4 else "#a78bfa" if _ri < 8 else "#f87171" if _ri >= 16 else "#94a3b8")
         _ratings_rows += (
             f'<tr><td style="text-align:center;color:#475569;font-family:monospace">{_ri+1}</td>'
-            f'<td style="{_bold}">{_short}</td>'
+            f'<td style="{_rbold}">{_rshort}</td>'
             f'<td style="text-align:center;color:#94a3b8;font-family:monospace">{_rat["atk"]:.3f}</td>'
             f'<td style="text-align:center;color:#94a3b8;font-family:monospace">{_rat["def"]:.3f}</td>'
-            f'<td style="text-align:center;color:{_net_col};font-family:monospace;font-weight:700">{_rat["net"]:.3f}</td>'
+            f'<td style="text-align:center;color:{_rnet_col};font-family:monospace;font-weight:700">{_rat["net"]:.3f}</td>'
+            f'</tr>'
+        )
+
+    # ── Multi-season projections table ────────────────────────────────
+    _teams_for_proj = sorted(
+        [(tn, td) for tn, td in team_evolution.items() if td["current_strength"]["position"] <= 10],
+        key=lambda x: x[1]["current_strength"]["position"],
+    )
+    _proj_rows_html = ""
+    for _pri, (_ptn, _ptd) in enumerate(_teams_for_proj):
+        _pcurr  = _ptd["current_strength"]
+        _ptrend = _ptd["trends"]
+        _ppos_t = "UP" if _ptrend["position_trend"] < -0.1 else "DOWN" if _ptrend["position_trend"] > 0.1 else "STABLE"
+        _ppts_t = "UP" if _ptrend["points_trend"]   >  0.1 else "DOWN" if _ptrend["points_trend"]   < -0.1 else "STABLE"
+        _p25 = next((p for p in _ptd["projections"] if p["season"] == 2025), None)
+        _p26 = next((p for p in _ptd["projections"] if p["season"] == 2026), None)
+        _p27 = next((p for p in _ptd["projections"] if p["season"] == 2027), None)
+        _pp25 = f"{_p25['position']} ±{_p25['position_std']:.1f}" if _p25 else "N/A"
+        _pp26 = f"{_p26['position']} ±{_p26['position_std']:.1f}" if _p26 else "N/A"
+        _pp27 = f"{_p27['position']} ±{_p27['position_std']:.1f}" if _p27 else "N/A"
+        _row_style = "background:rgba(99,102,241,0.1)" if _pri < 4 else ""
+        _proj_rows_html += (
+            f'<tr style="{_row_style}">'
+            f'<td style="font-weight:700;color:#E6EDF3">{_pri+1}</td>'
+            f'<td style="color:#E6EDF3">{_ptn.replace(" FC","").replace(" United","")}</td>'
+            f'<td style="text-align:center;color:#E6EDF3">{_pcurr["position"]}</td>'
+            f'<td style="text-align:center;color:#E6EDF3">{_pcurr["points"]}</td>'
+            f'<td style="text-align:center">{_ppos_t} {_ptrend["position_trend"]:+.2f}</td>'
+            f'<td style="text-align:center">{_ppts_t} {_ptrend["points_trend"]:+.1f}</td>'
+            f'<td style="text-align:center">{_pp25}</td>'
+            f'<td style="text-align:center">{_pp26}</td>'
+            f'<td style="text-align:center">{_pp27}</td>'
             f'</tr>'
         )
 
@@ -1894,35 +1777,23 @@ def _(
           <div style="display:grid;grid-template-columns:1.1fr 0.9fr;gap:24px;align-items:start">
             <table class="ptable">
               <thead><tr>
-                <th style="text-align:center">Pos</th>
-                <th>Club</th>
-                <th style="text-align:center">Move</th>
-                <th style="text-align:center">Cur Pts</th>
-                <th style="text-align:center">Proj Pts</th>
-                <th style="text-align:center">±Pos</th>
-                <th style="text-align:center">Top 4</th>
-                <th style="text-align:center">Top 6</th>
+                <th style="text-align:center">Pos</th><th>Club</th>
+                <th style="text-align:center">Move</th><th style="text-align:center">Cur Pts</th>
+                <th style="text-align:center">Proj Pts</th><th style="text-align:center">±Pos</th>
+                <th style="text-align:center">Top 4</th><th style="text-align:center">Top 6</th>
                 <th style="text-align:center">Rel</th>
               </tr></thead>
               <tbody>{_table_rows}</tbody>
             </table>
-            <div>
-              <img class="chart-img" src="data:image/png;base64,{_b64_a}" />
-              <div style="font-size:0.7rem;color:#8B949E;margin-top:8px;font-family:monospace">
-                <b style="color:#E6EDF3">Bold</b> = predicted by someone &nbsp;·&nbsp;
-                Proj Pts = mean across {N_SIM_SEASON:,} sims &nbsp;·&nbsp;
-                ±Pos = std dev of final position
-              </div>
-            </div>
+            <img class="chart-img" src="data:image/png;base64,{_b64_a}" />
           </div>
         </div>
 
         <div class="card">
-          <div class="section-title">🏆 Projected Final Leaderboard (if season ends as predicted)</div>
+          <div class="section-title">🏆 Projected Final Leaderboard</div>
           <div class="proj-highlight">
             <span style="font-size:0.8rem;color:#a5b4fc;font-family:monospace">
-              📌 These scores apply the <em>same scoring rules</em> to the model's predicted final table.
-              They show where each person is likely to finish if the SSM forecast is correct.
+              📌 Scores apply the same scoring rules to the SSM's predicted final table.
             </span>
           </div>
           {_proj_lb}
@@ -1934,7 +1805,7 @@ def _(
         </div>
 
         <div class="card">
-          <div class="section-title">📡 Team Strength Ratings (Posterior Means)</div>
+          <div class="section-title">📡 Team Strength Ratings</div>
           <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:24px;align-items:start">
             <table class="ptable">
               <thead><tr>
@@ -1945,185 +1816,48 @@ def _(
               </tr></thead>
               <tbody>{_ratings_rows}</tbody>
             </table>
-            <div>
-              <img class="chart-img" src="data:image/png;base64,{_b64_b}" />
-              <div style="font-size:0.7rem;color:#8B949E;margin-top:8px;font-family:monospace">
-                Attack α: expected goals scored vs avg defence<br>
-                Defence δ: expected goals conceded vs avg attack (lower = better)<br>
-                Net = α/δ (higher = stronger team overall) &nbsp;·&nbsp; <b style="color:#E6EDF3">Bold</b> = predicted team
-              </div>
-            </div>
+            <img class="chart-img" src="data:image/png;base64,{_b64_b}" />
           </div>
         </div>
 
         <details style="margin-top:8px">
-          <summary>📖 Model details &amp; caveats</summary>
-          <div class="card" style="margin-top:10px;font-size:0.83rem;color:#8B949E;line-height:1.8">
-            <p><b style="color:#E6EDF3">Bayesian State-Space Model</b> (Ridall, Titman &amp; Pettitt, 2024 — JRSS Series C).</p>
-            <p>The model tracks each team's latent <em>attack strength α</em> and <em>defence weakness δ</em>
-            as Gamma distributions updated sequentially after every match via the conjugate Gamma-Poisson relationship.
-            Home advantage η ≈ 0.26 (≈ 1.30× goal multiplier) is held fixed.</p>
-            <p>The <em>mean-field approximation</em> updates each team's parameters independently
-            using posterior means of opponent strengths — avoiding MCMC while retaining accuracy.</p>
-            <p><b style="color:#E6EDF3">Caveats:</b> The model treats all remaining fixtures as equally uncertain and
-            does not account for injuries, suspensions, fixture congestion, or managerial changes.
-            Simulations assume team strengths stay constant for remaining fixtures (no further forgetting).
-            Projected scores are the expected outcome if the SSM point forecast is exactly right —
-            treat them as directional, not precise.</p>
-          </div>
-        </details>
-
-        <details style="margin-top:8px">
-          <summary>📊 Multi-Season Analysis</summary>
+          <summary>📊 Multi-Season Historical Analysis (2000–2025)</summary>
           <div class="card" style="margin-top:16px">
-            <div class="section-title">📊 Multi-Season Team Projections (2000-2025 Analysis)</div>
-            
-            <div style="margin-bottom:20px">
-              <img src="data:image/png;base64,{_traj_b64}" style="width:100%;max-width:800px;border-radius:8px;">
+            <div class="section-title">📈 Position Trajectories</div>
+            <img src="data:image/png;base64,{traj_b64}" class="chart-img" style="margin-bottom:20px">
+            <div class="section-title">⚔️ Attack &amp; Defence Evolution</div>
+            <img src="data:image/png;base64,{strength_b64}" class="chart-img" style="margin-bottom:20px">
+            <div class="section-title" style="color:#a5b4fc">🔮 Future Position Projections</div>
+            <div style="overflow-x:auto">
+              <table class="ptable" style="font-size:0.75rem">
+                <thead><tr>
+                  <th>#</th><th>Team</th><th>Current Pos</th><th>Pts</th>
+                  <th>Pos Trend</th><th>Pts Trend</th>
+                  <th>2025 Proj</th><th>2026 Proj</th><th>2027 Proj</th>
+                </tr></thead>
+                <tbody>{_proj_rows_html}</tbody>
+              </table>
             </div>
-            
-            <div style="margin-bottom:20px">
-              <img src="data:image/png;base64,{_strength_b64}" style="width:100%;max-width:800px;border-radius:8px;">
-            </div>
-            
-            <div class="card" style="border-color:#6366f1">
-              <div class="section-title" style="color:#a5b4fc">🔮 Future Position Projections</div>
-              <div style="overflow-x:auto">
-                <table class="ptable" style="font-size:0.75rem">
-                  <thead>
-                    <tr>
-                      <th>Rank</th><th>Team</th><th>Current</th><th>Pts</th>
-                      <th>Pos Trend</th><th>Pts Trend</th>
-                      <th>2025 Proj</th><th>2026 Proj</th><th>2027 Proj</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {proj_rows}
-                  </tbody>
-                </table>
-              </div>
-              
-              <div style="margin-top:16px;font-size:0.8rem;color:#8B949E">
-                <p><strong>Legend:</strong> UP = Improving, DOWN = Declining, STABLE = No significant change</p>
-                <p><strong>Projections:</strong> Bayesian forecasts with confidence intervals based on 2000-2025 historical performance</p>
-                <p><strong>Trends:</strong> Calculated using linear regression on historical data</p>
-              </div>
+            <div style="margin-top:12px;font-size:0.78rem;color:#8B949E">
+              UP = Improving · DOWN = Declining · STABLE = No significant change<br>
+              Projections use linear regression on 2000–2025 data with expanding confidence intervals.
             </div>
           </div>
         </details>
+
+      </div>
+    </details>
     """)
+    return
 
 
-# ─── Multi-Season Analysis Display ─────────────────────────────────────────────────────
-@app.cell(hide_code=True)
-def _(BG, CARD, COLORS, MUTED, TEXT, base64, historical_data, io, matplotlib, 
-      mo, np, plt, team_evolution, team_history, _strength_b64, _traj_b64):
-    """Display multi-season analysis with team trajectories and projections"""
-    
-    # Create projections table for top teams
-    teams_for_projections = []
-    for team_name, team_data in team_evolution.items():
-        if team_data["current_strength"]["position"] <= 10:  # Top 10 teams
-            teams_for_projections.append((team_name, team_data))
-    
-    teams_for_projections.sort(key=lambda x: x[1]["current_strength"]["position"])
-    
-    # Generate projection table HTML
-    proj_rows = ""
-    for i, (team_name, team_data) in enumerate(teams_for_projections):
-        current = team_data["current_strength"]
-        trend = team_data["trends"]
-        
-        # Trend indicators
-        pos_trend = "UP" if trend["position_trend"] < -0.1 else "DOWN" if trend["position_trend"] > 0.1 else "STABLE"
-        pts_trend = "UP" if trend["points_trend"] > 0.1 else "DOWN" if trend["points_trend"] < -0.1 else "STABLE"
-        atk_trend = "UP" if trend["attack_trend"] > 0.01 else "DOWN" if trend["attack_trend"] < -0.01 else "STABLE"
-        def_trend = "UP" if trend["defense_trend"] < -0.01 else "DOWN" if trend["defense_trend"] > 0.01 else "STABLE"
-        
-        # Future projections
-        proj_2025 = next((p for p in team_data["projections"] if p["season"] == 2025), None)
-        proj_2026 = next((p for p in team_data["projections"] if p["season"] == 2026), None)
-        proj_2027 = next((p for p in team_data["projections"] if p["season"] == 2027), None)
-        
-        proj_pos_2025 = f"{proj_2025['position']} ±{proj_2025['position_std']:.1f}" if proj_2025 else "N/A"
-        proj_pos_2026 = f"{proj_2026['position']} ±{proj_2026['position_std']:.1f}" if proj_2026 else "N/A"
-        proj_pos_2027 = f"{proj_2027['position']} ±{proj_2027['position_std']:.1f}" if proj_2027 else "N/A"
-        
-        row_style = "background:rgba(99,102,241,0.1)" if i < 4 else ""
-        
-        proj_rows += f"""
-        <tr style="{row_style}">
-          <td style="font-weight:700;color:#E6EDF3">{i+1}</td>
-          <td style="color:#E6EDF3">{team_name.replace(' FC','').replace(' United','')}</td>
-          <td style="text-align:center;color:#E6EDF3">{current['position']}</td>
-          <td style="text-align:center;color:#E6EDF3">{current['points']}</td>
-          <td style="text-align:center">{pos_trend} {trend['position_trend']:+.2f}</td>
-          <td style="text-align:center">{pts_trend} {trend['points_trend']:+.1f}</td>
-          <td style="text-align:center">{proj_pos_2025}</td>
-          <td style="text-align:center">{proj_pos_2026}</td>
-          <td style="text-align:center">{proj_pos_2027}</td>
-        </tr>"""
-    
-    projections_html = f"""
-    <div class="card" style="margin-top:16px">
-      <div class="section-title">📊 Multi-Season Team Projections (2000-2025 Analysis)</div>
-      
-      <div style="margin-bottom:20px">
-        <img src="data:image/png;base64,{_traj_b64}" style="width:100%;max-width:800px;border-radius:8px;">
-      </div>
-      
-      <div style="margin-bottom:20px">
-        <img src="data:image/png;base64,{_strength_b64}" style="width:100%;max-width:800px;border-radius:8px;">
-      </div>
-      
-      <div class="card" style="border-color:#6366f1">
-        <div class="section-title" style="color:#a5b4fc">🔮 Future Position Projections</div>
-        <div style="overflow-x:auto">
-          <table class="ptable" style="font-size:0.75rem">
-            <thead>
-              <tr>
-                <th>Rank</th><th>Team</th><th>Current</th><th>Pts</th>
-                <th>Pos Trend</th><th>Pts Trend</th>
-                <th>2025 Proj</th><th>2026 Proj</th><th>2027 Proj</th>
-              </tr>
-            </thead>
-            <tbody>
-              {proj_rows}
-            </tbody>
-          </table>
-        </div>
-        
-        <div style="margin-top:16px;font-size:0.8rem;color:#8B949E">
-          <p><strong>Legend:</strong> UP = Improving, DOWN = Declining, STABLE = No significant change</p>
-          <p><strong>Projections:</strong> Bayesian forecasts with confidence intervals based on 2000-2025 historical performance</p>
-          <p><strong>Trends:</strong> Calculated using linear regression on historical data</p>
-        </div>
-      </div>
-    </div>
-    </details>"""
-    
-    mo.Html(projections_html)
-
-
-# ── Render.com deployment ────────────────────────────────────────────────────
+# ── Render.com deployment ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Render sets the port in the $PORT environment variable
-    import os
-    import sys
-    
-    print("=== DEPLOYMENT DEBUG ===")
-    print(f"Python version: {sys.version}")
-    print(f"Environment variables: {dict(os.environ)}")
-    
+    import os, sys
     try:
         port = int(os.environ.get("PORT", 8000))
-        print(f"Starting marimo app on port {port}...")
-        print(f"Host: 0.0.0.0, Port: {port}")
-        print("About to call app.run...")
         app.run(host="0.0.0.0", port=port)
-        print("app.run() completed")
     except Exception as e:
         print(f"Error starting app: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         sys.exit(1)
