@@ -1673,11 +1673,19 @@ if __name__ == "__main__":
     import os
     import sys
     
+    print("=== DEPLOYMENT DEBUG ===")
+    print(f"Python version: {sys.version}")
+    print(f"Environment variables: {dict(os.environ)}")
+    
     try:
         port = int(os.environ.get("PORT", 8000))
         print(f"Starting marimo app on port {port}...")
         print(f"Host: 0.0.0.0, Port: {port}")
+        print("About to call app.run...")
         app.run(host="0.0.0.0", port=port)
+        print("app.run() completed")
     except Exception as e:
         print(f"Error starting app: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
