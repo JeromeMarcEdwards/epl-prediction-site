@@ -666,7 +666,8 @@ def _(all_matches, current_table, np, PREDICTIONS, T6_BON, EX_BON):
 
     _ranks = np.zeros((N_SIM_SEASON, n_teams), dtype=int)
     for _sim_i in range(N_SIM_SEASON):
-        _order = np.lexsort(_sort_key[_sim_i, :, ::-1].T)[::-1]
+        # Sort by points (desc), then goal difference (desc), then goals scored (desc)
+        _order = np.lexsort((_sort_key[_sim_i, :, 2], _sort_key[_sim_i, :, 1], _sort_key[_sim_i, :, 0]))
         _ranks[_sim_i, _order] = np.arange(1, n_teams + 1)
 
     _mean_pos  = _ranks.mean(axis=0)
