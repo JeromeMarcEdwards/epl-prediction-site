@@ -507,7 +507,83 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2023, T6_BON,
     return (
         actual_pos_2023, best_md_2023, current_matchday_2023, current_table_2023, errors_2023,
         fetched_at_2023, gw_scores_2023, historical_2023, ranked_2023, results_2023,
+        historical_data, team_history, all_teams,
     )
+
+
+# ─── Historical Data Fetching for Multi-Season Analysis ──────────────────────────────────────
+@app.cell(hide_code=True)
+def _(BASE, HEADERS, np, requests):
+    """Fetch historical EPL data from 2000-2001 season onwards"""
+    
+    def _api_historical(path, params=None):
+        try:
+            r = requests.get(f"{BASE}{path}", headers=HEADERS, params=params, timeout=15)
+            if r.status_code == 200:
+                return r.json()
+            return {}
+        except Exception as e:
+            return {}
+    
+    # Fetch historical standings from 2000-2025
+    historical_data = {}
+    all_teams = set()
+    
+    for season in range(2000, 2026):
+        print(f"Fetching season {season}-{season+1}...")
+        standings_data = _api_historical("/competitions/PL/standings", {"season": season})
+        
+        season_teams = []
+        for s in standings_data.get("standings", []):
+            if s.get("type") == "TOTAL":
+                for t in s.get("table", []):
+                    team_name = t.get("team", {}).get("name", "")
+                    if team_name:
+                        season_teams.append({
+                            "season": season,
+                            "name": team_name,
+                            "position": t.get("position", 20),
+                            "points": t.get("points", 0),
+                            "goal_difference": t.get("goalDifference", 0),
+                            "goals_for": t.get("goalsFor", 0),
+                            "goals_against": t.get("goalsAgainst", 0),
+                            "played": t.get("playedGames", 0),
+                            "won": t.get("won", 0),
+                            "draw": t.get("draw", 0),
+                            "lost": t.get("lost", 0)
+                        })
+                        all_teams.add(team_name)
+                break
+        
+        historical_data[season] = season_teams
+    
+    # Create team historical time series
+    team_history = {}
+    for team in sorted(all_teams):
+        team_data = []
+        for season in range(2000, 2026):
+            season_teams = historical_data.get(season, [])
+            team_season = next((t for t in season_teams if t["name"] == team), None)
+            if team_season:
+                team_data.append(team_season)
+            else:
+                # Team wasn't in Premier League this season (promoted/relegated)
+                team_data.append({
+                    "season": season,
+                    "name": team,
+                    "position": None,  # Not in PL this season
+                    "points": 0,
+                    "goal_difference": 0,
+                    "goals_for": 0,
+                    "goals_against": 0,
+                    "played": 0,
+                    "won": 0,
+                    "draw": 0,
+                    "lost": 0
+                })
+        team_history[team] = team_data
+    
+    return historical_data, team_history, sorted(all_teams)
 
 
 # ─── NEW: Bayesian SSM computation cell ──────────────────────────────────────
@@ -739,6 +815,240 @@ def _(all_matches, current_table, np, PREDICTIONS, T6_BON, EX_BON):
         N_SIM_SEASON, n_remaining, pred_pos_dict, predicted_final_table,
         projected_ranked, projected_scores, ssm_ratings, ssm_teams,
     )
+
+
+# ─── Multi-Season Bayesian Model for Team Evolution ──────────────────────────────────────
+@app.cell(hide_code=True)
+def _(historical_data, team_history, all_teams, np):
+    """Build multi-season Bayesian model to analyze team strength evolution"""
+    
+    # Hyperparameters for multi-season analysis
+    PHI_BETWEEN = 0.85  # between-season forgetting factor (higher = more change between seasons)
+    MIN_SEASONS = 3   # minimum seasons needed for reliable analysis
+    
+    # Calculate team strength evolution for each team
+    team_evolution = {}
+    
+    for team in all_teams:
+        team_data = team_history[team]
+        
+        # Filter out seasons where team wasn't in PL
+        valid_seasons = [s for s in team_data if s["position"] is not None]
+        
+        if len(valid_seasons) < MIN_SEASONS:
+            continue
+            
+        # Extract performance metrics over time
+        seasons = [s["season"] for s in valid_seasons]
+        positions = [s["position"] for s in valid_seasons]
+        points = [s["points"] for s in valid_seasons]
+        goal_diffs = [s["goal_difference"] for s in valid_seasons]
+        
+        # Calculate attack/defense strength proxies
+        # Attack: goals scored per game
+        attack_strength = [s["goals_for"] / max(s["played"], 1) for s in valid_seasons]
+        # Defense: goals conceded per game (lower is better)
+        defense_strength = [s["goals_against"] / max(s["played"], 1) for s in valid_seasons]
+        
+        # Bayesian trend analysis using simple linear regression with uncertainty
+        n_seasons = len(seasons)
+        
+        # Position trend (lower is better)
+        pos_coeffs = np.polyfit(seasons, positions, 1)
+        pos_trend = pos_coeffs[0]  # negative = improving
+        pos_uncertainty = np.std([p - (pos_coeffs[0] * s + pos_coeffs[1]) for s, p in zip(seasons, positions)])
+        
+        # Points trend (higher is better)
+        pts_coeffs = np.polyfit(seasons, points, 1)
+        pts_trend = pts_coeffs[0]  # positive = improving
+        pts_uncertainty = np.std([p - (pts_coeffs[0] * s + pts_coeffs[1]) for s, p in zip(seasons, points)])
+        
+        # Attack trend (higher is better)
+        atk_coeffs = np.polyfit(seasons, attack_strength, 1)
+        atk_trend = atk_coeffs[0]
+        atk_uncertainty = np.std([a - (atk_coeffs[0] * s + atk_coeffs[1]) for s, a in zip(seasons, attack_strength)])
+        
+        # Defense trend (lower is better, so negative trend = improving)
+        def_coeffs = np.polyfit(seasons, defense_strength, 1)
+        def_trend = def_coeffs[0]
+        def_uncertainty = np.std([d - (def_coeffs[0] * s + def_coeffs[1]) for s, d in zip(seasons, defense_strength)])
+        
+        # Project future performance (next 3 seasons)
+        future_seasons = [2025, 2026, 2027]
+        proj_positions = []
+        proj_points = []
+        proj_attack = []
+        proj_defense = []
+        
+        for fs in future_seasons:
+            # Position projection with uncertainty
+            proj_pos = pos_coeffs[0] * fs + pos_coeffs[1]
+            proj_pos_std = pos_uncertainty * np.sqrt(1 + (fs - seasons[-1])**2 / np.var(seasons))
+            
+            # Points projection
+            proj_pts = pts_coeffs[0] * fs + pts_coeffs[1]
+            proj_pts_std = pts_uncertainty * np.sqrt(1 + (fs - seasons[-1])**2 / np.var(seasons))
+            
+            # Attack/Defense projections
+            proj_atk = atk_coeffs[0] * fs + atk_coeffs[1]
+            proj_atk_std = atk_uncertainty * np.sqrt(1 + (fs - seasons[-1])**2 / np.var(seasons))
+            
+            proj_def = def_coeffs[0] * fs + def_coeffs[1]
+            proj_def_std = def_uncertainty * np.sqrt(1 + (fs - seasons[-1])**2 / np.var(seasons))
+            
+            proj_positions.append({
+                "season": fs,
+                "position": max(1, min(20, int(round(proj_pos)))),
+                "position_std": proj_pos_std,
+                "points": max(0, int(round(proj_pts))),
+                "points_std": proj_pts_std,
+                "attack": proj_atk,
+                "attack_std": proj_atk_std,
+                "defense": proj_def,
+                "defense_std": proj_def_std
+            })
+        
+        team_evolution[team] = {
+            "historical": {
+                "seasons": seasons,
+                "positions": positions,
+                "points": points,
+                "attack": attack_strength,
+                "defense": defense_strength
+            },
+            "trends": {
+                "position_trend": pos_trend,
+                "points_trend": pts_trend,
+                "attack_trend": atk_trend,
+                "defense_trend": def_trend,
+                "position_uncertainty": pos_uncertainty,
+                "points_uncertainty": pts_uncertainty,
+                "attack_uncertainty": atk_uncertainty,
+                "defense_uncertainty": def_uncertainty
+            },
+            "projections": proj_positions,
+            "current_strength": {
+                "attack": attack_strength[-1] if attack_strength else 0,
+                "defense": defense_strength[-1] if defense_strength else 0,
+                "position": positions[-1] if positions else 20,
+                "points": points[-1] if points else 0
+            }
+        }
+    
+    return team_evolution
+
+
+# ─── Multi-Season Visualization ─────────────────────────────────────────────────────
+@app.cell(hide_code=True)
+def _(BG, CARD, COLORS, MUTED, TEXT, base64, historical_data, io, matplotlib, 
+      mo, np, plt, team_evolution, team_history):
+    """Create visualizations for multi-season team analysis"""
+    
+    # Create team trajectory charts
+    _fig_traj, _ax_traj = plt.subplots(figsize=(14, 8), facecolor=BG)
+    _ax_traj.set_facecolor(CARD)
+    
+    # Select top 8 teams by current position for trajectory plot
+    teams_to_plot = []
+    for team_data in team_evolution.values():
+        if team_data["current_strength"]["position"] <= 8:
+            teams_to_plot.append(team_data)
+    
+    teams_to_plot = sorted(teams_to_plot, key=lambda x: x["current_strength"]["position"])
+    
+    colors_list = plt.cm.tab10(np.linspace(0, 1, len(teams_to_plot)))
+    
+    # Plot position trajectories
+    for i, team_data in enumerate(teams_to_plot):
+        team_name = team_data["historical"]["seasons"][-1]
+        seasons = team_data["historical"]["seasons"]
+        positions = team_data["historical"]["positions"]
+        
+        # Filter out None positions (seasons not in PL)
+        valid_data = [(s, p) for s, p in zip(seasons, positions) if p is not None]
+        if valid_data:
+            plot_seasons, plot_positions = zip(*valid_data)
+            _ax_traj.plot(plot_seasons, plot_positions, 
+                        color=colors_list[i], linewidth=2, alpha=0.8, 
+                        label=team_name.replace(" FC", "").replace(" United", ""))
+            
+            # Add trend line
+            trend_coeffs = np.polyfit(plot_seasons, plot_positions, 1)
+            trend_line = [trend_coeffs[0] * s + trend_coeffs[1] for s in plot_seasons]
+            _ax_traj.plot(plot_seasons, trend_line, 
+                        color=colors_list[i], linewidth=1, alpha=0.4, linestyle='--')
+    
+    _ax_traj.set_xlabel("Season", color=MUTED, fontsize=10)
+    _ax_traj.set_ylabel("Final League Position", color=MUTED, fontsize=10)
+    _ax_traj.set_title("Team Position Trajectories (2000-2025)", color=TEXT, fontsize=12, pad=15)
+    _ax_traj.invert_yaxis()  # Lower position number is better
+    _ax_traj.grid(True, alpha=0.3)
+    _ax_traj.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Style the plot
+    for spine in _ax_traj.spines.values():
+        spine.set_edgecolor("#30363D")
+    
+    _ax_traj.tick_params(colors=MUTED)
+    
+    # Convert to base64
+    _buf_traj = io.BytesIO()
+    _fig_traj.savefig(_buf_traj, format='png', dpi=100, bbox_inches='tight', 
+                    facecolor=BG, edgecolor='none')
+    _buf_traj.seek(0)
+    _traj_b64 = base64.b64encode(_buf_traj.getvalue()).decode()
+    
+    # Create attack/defense evolution chart
+    _fig_strength, _ax_strength = plt.subplots(2, 1, figsize=(14, 10), facecolor=BG)
+    _fig_strength.suptitle("Team Strength Evolution (Attack vs Defense)", color=TEXT, fontsize=14)
+    
+    for i, team_data in enumerate(teams_to_plot[:6]):  # Top 6 teams
+        team_name = team_data["historical"]["seasons"][-1]
+        seasons = team_data["historical"]["seasons"]
+        attack = team_data["historical"]["attack"]
+        defense = team_data["historical"]["defense"]
+        
+        # Filter valid data
+        valid_data = [(s, a, d) for s, a, d in zip(seasons, attack, defense) 
+                    if s is not None and a is not None and d is not None]
+        if valid_data:
+            plot_seasons, plot_attack, plot_defense = zip(*valid_data)
+            
+            # Attack subplot
+            _ax_strength[0].plot(plot_seasons, plot_attack, 
+                                color=colors_list[i], linewidth=2, alpha=0.8,
+                                label=team_name.replace(" FC", ""))
+            
+            # Defense subplot (inverted - lower is better)
+            _ax_strength[1].plot(plot_seasons, plot_defense, 
+                                color=colors_list[i], linewidth=2, alpha=0.8,
+                                label=team_name.replace(" FC", ""))
+    
+    _ax_strength[0].set_ylabel("Goals Scored Per Game", color=MUTED, fontsize=10)
+    _ax_strength[0].set_title("Attack Strength Evolution", color=TEXT, fontsize=11)
+    _ax_strength[0].grid(True, alpha=0.3)
+    _ax_strength[0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    _ax_strength[1].set_ylabel("Goals Conceded Per Game", color=MUTED, fontsize=10)
+    _ax_strength[1].set_title("Defense Strength Evolution", color=TEXT, fontsize=11)
+    _ax_strength[1].invert_yaxis()  # Lower is better
+    _ax_strength[1].grid(True, alpha=0.3)
+    _ax_strength[1].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    for ax in _ax_strength:
+        ax.set_xlabel("Season", color=MUTED, fontsize=10)
+        ax.tick_params(colors=MUTED)
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#30363D")
+    
+    # Convert to base64
+    _buf_strength = io.BytesIO()
+    _fig_strength.savefig(_buf_strength, format='png', dpi=100, bbox_inches='tight',
+                       facecolor=BG, edgecolor='none')
+    _buf_strength.seek(0)
+    _strength_b64 = base64.b64encode(_buf_strength.getvalue()).decode()
+    
+    return _traj_b64, _strength_b64
 
 
 @app.cell(hide_code=True)
@@ -1662,10 +1972,137 @@ def _(
             treat them as directional, not precise.</p>
           </div>
         </details>
-      </div>
-    </details>
+
+        <details style="margin-top:8px">
+          <summary>📊 Multi-Season Analysis</summary>
+          <div class="card" style="margin-top:16px">
+            <div class="section-title">📊 Multi-Season Team Projections (2000-2025 Analysis)</div>
+            
+            <div style="margin-bottom:20px">
+              <img src="data:image/png;base64,{_traj_b64}" style="width:100%;max-width:800px;border-radius:8px;">
+            </div>
+            
+            <div style="margin-bottom:20px">
+              <img src="data:image/png;base64,{_strength_b64}" style="width:100%;max-width:800px;border-radius:8px;">
+            </div>
+            
+            <div class="card" style="border-color:#6366f1">
+              <div class="section-title" style="color:#a5b4fc">🔮 Future Position Projections</div>
+              <div style="overflow-x:auto">
+                <table class="ptable" style="font-size:0.75rem">
+                  <thead>
+                    <tr>
+                      <th>Rank</th><th>Team</th><th>Current</th><th>Pts</th>
+                      <th>Pos Trend</th><th>Pts Trend</th>
+                      <th>2025 Proj</th><th>2026 Proj</th><th>2027 Proj</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {proj_rows}
+                  </tbody>
+                </table>
+              </div>
+              
+              <div style="margin-top:16px;font-size:0.8rem;color:#8B949E">
+                <p><strong>Legend:</strong> ↗️ = Improving, ↘️ = Declining, → = Stable</p>
+                <p><strong>Projections:</strong> Bayesian forecasts with confidence intervals based on 2000-2025 historical performance</p>
+                <p><strong>Trends:</strong> Calculated using linear regression on historical data</p>
+              </div>
+            </div>
+          </div>
+        </details>
     """)
-    return
+
+
+# ─── Multi-Season Analysis Display ─────────────────────────────────────────────────────
+@app.cell(hide_code=True)
+def _(BG, CARD, COLORS, MUTED, TEXT, base64, historical_data, io, matplotlib, 
+      mo, np, plt, team_evolution, team_history, _strength_b64, _traj_b64):
+    """Display multi-season analysis with team trajectories and projections"""
+    
+    # Create projections table for top teams
+    teams_for_projections = []
+    for team_name, team_data in team_evolution.items():
+        if team_data["current_strength"]["position"] <= 10:  # Top 10 teams
+            teams_for_projections.append((team_name, team_data))
+    
+    teams_for_projections.sort(key=lambda x: x[1]["current_strength"]["position"])
+    
+    # Generate projection table HTML
+    proj_rows = ""
+    for i, (team_name, team_data) in enumerate(teams_for_projections):
+        current = team_data["current_strength"]
+        trend = team_data["trends"]
+        
+        # Trend indicators
+        pos_trend = "↗️" if trend["position_trend"] < -0.1 else "↘️" if trend["position_trend"] > 0.1 else "→"
+        pts_trend = "↗️" if trend["points_trend"] > 0.1 else "↘️" if trend["points_trend"] < -0.1 else "→"
+        atk_trend = "↗️" if trend["attack_trend"] > 0.01 else "↘️" if trend["attack_trend"] < -0.01 else "→"
+        def_trend = "↗️" if trend["defense_trend"] < -0.01 else "↘️" if trend["defense_trend"] > 0.01 else "→"
+        
+        # Future projections
+        proj_2025 = next((p for p in team_data["projections"] if p["season"] == 2025), None)
+        proj_2026 = next((p for p in team_data["projections"] if p["season"] == 2026), None)
+        proj_2027 = next((p for p in team_data["projections"] if p["season"] == 2027), None)
+        
+        proj_pos_2025 = f"{proj_2025['position']} ±{proj_2025['position_std']:.1f}" if proj_2025 else "N/A"
+        proj_pos_2026 = f"{proj_2026['position']} ±{proj_2026['position_std']:.1f}" if proj_2026 else "N/A"
+        proj_pos_2027 = f"{proj_2027['position']} ±{proj_2027['position_std']:.1f}" if proj_2027 else "N/A"
+        
+        row_style = "background:rgba(99,102,241,0.1)" if i < 4 else ""
+        
+        proj_rows += f"""
+        <tr style="{row_style}">
+          <td style="font-weight:700;color:#E6EDF3">{i+1}</td>
+          <td style="color:#E6EDF3">{team_name.replace(' FC','').replace(' United','')}</td>
+          <td style="text-align:center;color:#E6EDF3">{current['position']}</td>
+          <td style="text-align:center;color:#E6EDF3">{current['points']}</td>
+          <td style="text-align:center">{pos_trend} {trend['position_trend']:+.2f}</td>
+          <td style="text-align:center">{pts_trend} {trend['points_trend']:+.1f}</td>
+          <td style="text-align:center">{proj_pos_2025}</td>
+          <td style="text-align:center">{proj_pos_2026}</td>
+          <td style="text-align:center">{proj_pos_2027}</td>
+        </tr>"""
+    
+    projections_html = f"""
+    <div class="card" style="margin-top:16px">
+      <div class="section-title">📊 Multi-Season Team Projections (2000-2025 Analysis)</div>
+      
+      <div style="margin-bottom:20px">
+        <img src="data:image/png;base64,{_traj_b64}" style="width:100%;max-width:800px;border-radius:8px;">
+      </div>
+      
+      <div style="margin-bottom:20px">
+        <img src="data:image/png;base64,{_strength_b64}" style="width:100%;max-width:800px;border-radius:8px;">
+      </div>
+      
+      <div class="card" style="border-color:#6366f1">
+        <div class="section-title" style="color:#a5b4fc">🔮 Future Position Projections</div>
+        <div style="overflow-x:auto">
+          <table class="ptable" style="font-size:0.75rem">
+            <thead>
+              <tr>
+                <th>Rank</th><th>Team</th><th>Current</th><th>Pts</th>
+                <th>Pos Trend</th><th>Pts Trend</th>
+                <th>2025 Proj</th><th>2026 Proj</th><th>2027 Proj</th>
+              </tr>
+            </thead>
+            <tbody>
+              {proj_rows}
+            </tbody>
+          </table>
+        </div>
+        
+        <div style="margin-top:16px;font-size:0.8rem;color:#8B949E">
+          <p><strong>Legend:</strong> ↗️ = Improving, ↘️ = Declining, → = Stable</p>
+          <p><strong>Projections:</strong> Bayesian forecasts with confidence intervals based on 2000-2025 historical performance</p>
+          <p><strong>Trends:</strong> Calculated using linear regression on historical data</p>
+        </div>
+      </div>
+    </div>
+    </details>"""
+    
+    mo.Html(projections_html)
 
 
 # ── Render.com deployment ────────────────────────────────────────────────────
