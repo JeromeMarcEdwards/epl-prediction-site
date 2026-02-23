@@ -1671,5 +1671,13 @@ def _(
 if __name__ == "__main__":
     # Render sets the port in the $PORT environment variable
     import os
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    import sys
+    
+    try:
+        port = int(os.environ.get("PORT", 8000))
+        print(f"Starting marimo app on port {port}...")
+        print(f"Host: 0.0.0.0, Port: {port}")
+        app.run(host="0.0.0.0", port=port)
+    except Exception as e:
+        print(f"Error starting app: {e}", file=sys.stderr)
+        sys.exit(1)
