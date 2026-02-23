@@ -189,7 +189,7 @@ def _(BASE, COLORS, EX_BON, HEADERS, PREDICTIONS, SEASON, T6_BON,
             for _t in _s["table"]:
                 current_table.append({
                     "pos": _t["position"], "name": _t["team"]["name"],
-                    "pts": _t["points"], "gd": _t["goalDifference"],
+                    "pts": _t["points"], "gd": _t.get("goalDifference", 0),
                     "gf": _t["goalsFor"], "ga": _t["goalsAgainst"],
                     "played": _t["playedGames"], "won": _t["won"],
                     "draw": _t["draw"], "lost": _t["lost"],
@@ -334,7 +334,7 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2024, T6_BON,
             for _t in _s["table"]:
                 current_table_2024.append({
                     "pos": _t["position"], "name": _t["team"]["name"],
-                    "pts": _t["points"], "gd": _t["goalDifference"],
+                    "pts": _t["points"], "gd": _t.get("goalDifference", 0),
                     "gf": _t["goalsFor"], "ga": _t["goalsAgainst"],
                     "played": _t["playedGames"], "won": _t["won"],
                     "draw": _t["draw"], "lost": _t["lost"],
@@ -448,7 +448,7 @@ def _(BASE, EX_BON, HEADERS, PREDICTIONS_2023, T6_BON,
             for _t in _s["table"]:
                 current_table_2023.append({
                     "pos": _t["position"], "name": _t["team"]["name"],
-                    "pts": _t["points"], "gd": _t["goalDifference"],
+                    "pts": _t["points"], "gd": _t.get("goalDifference", 0),
                     "gf": _t["goalsFor"], "ga": _t["goalsAgainst"],
                     "played": _t["playedGames"], "won": _t["won"],
                     "draw": _t["draw"], "lost": _t["lost"],
@@ -600,7 +600,7 @@ def _(all_matches, current_table, np, PREDICTIONS, T6_BON, EX_BON):
     for _t in current_table:
         _current_pts[_t["name"]] = _t["pts"]
         _current_gf[_t["name"]]  = _t["gf"]
-        _current_gd[_t["name"]]  = _t["goalDifference"]
+        _current_gd[_t["name"]]  = _t.get("goalDifference", 0)
 
     # ── Attack/defence means for rating table ────────────────────────
     ssm_ratings = {}
