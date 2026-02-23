@@ -1007,52 +1007,6 @@ def _(BG, CARD, COLORS, MUTED, TEXT, base64, gw_scores_2023, historical_2023, io
 
 
 @app.cell(hide_code=True)
-def _(BG, CARD, COLORS, MUTED, TEXT, base64, gw_scores_2024, historical_2024, io, mo, pe, plt):
-    # 2024-2025 score evolution chart
-    _fig, _ax = plt.subplots(figsize=(12, 4), facecolor=BG)
-    _ax.set_facecolor(CARD)
-    for _sp in _ax.spines.values():
-        _sp.set_edgecolor("#30363D")
-
-    if historical_2024:
-        _all_s = [s for pts in gw_scores_2024.values() for _, s in pts]
-        _ymax  = max(_all_s) + 1
-        for _p, _pts in gw_scores_2024.items():
-            _w = [w for w, _ in _pts]
-            _s = [s for _, s in _pts]
-            _c = COLORS[_p]
-            _ax.fill_between(_w, _s, _ymax + 2, alpha=0.07, color=_c, zorder=1)
-            _ax.plot(_w, _s, color=_c, lw=2.5, zorder=3, solid_capstyle="round",
-                     marker="o", markersize=4, markerfacecolor=_c, markeredgewidth=0)
-            _ax.plot(_w[-1], _s[-1], "o", ms=10, color=_c, zorder=5,
-                     markeredgecolor=BG, markeredgewidth=2)
-            _ax.text(_w[-1]+0.25, _s[-1], f" {_p}  {_s[-1]}", color=_c,
-                     fontsize=9, fontfamily="monospace", va="center", fontweight="bold",
-                     path_effects=[pe.withStroke(linewidth=2.5, foreground=BG)])
-        _gws = [w for w, _ in historical_2024]
-        _ax.set_xlim(min(_gws)-0.5, max(_gws)+4)
-        _ax.invert_yaxis()
-        _ax.set_xlabel("Matchday", color=MUTED, fontsize=9, fontfamily="monospace")
-        _ax.set_ylabel("Score  (↑ = better)", color=MUTED, fontsize=9, fontfamily="monospace")
-        _ax.text(0.01, 0.03, "↑ better", transform=_ax.transAxes, color=MUTED, fontsize=8, fontfamily="monospace")
-    else:
-        _ax.text(0.5, 0.5, "No finished matches yet this season",
-                 ha="center", va="center", color=MUTED, fontsize=11, transform=_ax.transAxes)
-
-    _ax.set_title("Prediction Score Evolution by Matchday — 2024/25", color=TEXT, fontsize=11, fontfamily="monospace", pad=12)
-    _ax.tick_params(colors=MUTED)
-    _ax.grid(color="#30363D", lw=0.6, linestyle="--", alpha=0.6, zorder=0)
-    _fig.tight_layout(pad=1.5)
-    _buf = io.BytesIO()
-    _fig.savefig(_buf, format="png", dpi=150, bbox_inches="tight", facecolor=BG)
-    plt.close(_fig); _buf.seek(0)
-    _b64_2024 = base64.b64encode(_buf.read()).decode()
-    
-    chart_2024 = f'<div class="card" style="margin-bottom:20px"><div class="section-title">📈 Score Evolution</div><img class="chart-img" src="data:image/png;base64,{_b64_2024}" /></div>'
-    return chart_2024
-
-
-@app.cell(hide_code=True)
 def _(COLORS, PREDICTIONS_2024, current_matchday_2024, current_table_2024, errors_2024,
       fetched_at_2024, mo, ranked_2024, results_2024, chart_2024):
     _err = f" · ⚠️ {'; '.join(errors_2024)}" if errors_2024 else ""
@@ -1088,7 +1042,7 @@ def _(COLORS, PREDICTIONS_2024, current_matchday_2024, current_table_2024, error
                   '<span style="background:#1a2e1a;padding:2px 8px;border-radius:4px;color:#FFD700;margin-right:8px">🎯 exact (−5)</span>'
                   '<span style="background:#14232b;padding:2px 8px;border-radius:4px;color:#4FC3C3">✅ top-6 (−2)</span></td></tr>')
         return (f'<div class="card" style="border-color:{c}44">'
-                f'<div class="section-title" style="color:{c}">{_m2[i]} {p} &nbsp;·&nbsp;'
+                f'<div class="section-title" style="color:{c}">{_m2[i]} {p} &​nbsp;·&​nbsp;'
                 f'<span style="color:#E6EDF3;font-size:0.85rem">{s["total"]} pts</span></div>'
                 f'<table class="ptable"><thead><tr><th>#</th><th>Predicted</th>'
                 f'<th style="text-align:center">Actual</th><th style="text-align:center">Δ</th>'
@@ -1119,7 +1073,7 @@ def _(COLORS, PREDICTIONS_2024, current_matchday_2024, current_table_2024, error
       <div style="margin-top:16px">
         <div class="statusbar">
           <span>Final Season · {fetched_at_2024}{_err}</span>
-          <span>{len(current_table_2024)} clubs &nbsp;·&nbsp; {_gws}</span>
+          <span>{len(current_table_2024)} clubs &​nbsp;·&​nbsp; {_gws}</span>
         </div>
         {leaderboard}
         {chart_2024}
