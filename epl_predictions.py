@@ -592,18 +592,18 @@ def _(all_matches, current_table, np, PREDICTIONS, T6_BON, EX_BON):
     """
     Bayesian State-Space Model — Gamma-Poisson conjugate filter.
 
-    For each team i, we track latent attack α_i ~ Gamma(a_i, b_i)
-    and defence δ_i ~ Gamma(c_i, d_i).
+    For each team i, we track latent attack alpha_i ~ Gamma(a_i, b_i)
+    and defence delta_i ~ Gamma(c_i, d_i).
 
     After observing home goals H, away goals A:
       Conjugate update (mean-field):
-        a_h += H,  b_h += E[1/δ_a] * exp(η)
-        a_a += A,  b_a += E[1/δ_h]
-        c_h += A,  d_h += E[α_a] / exp(η)
-        c_a += H,  d_a += E[α_h] * exp(η)
+        a_h += H,  b_h += E[1/delta_a] * exp(eta)
+        a_a += A,  b_a += E[1/delta_h]
+        c_h += A,  d_h += E[alpha_a] / exp(eta)
+        c_a += H,  d_a += E[alpha_h] * exp(eta)
 
-    State evolution: multiply shape/rate by φ after each match
-    (preserves mean, inflates variance → tracks time-varying form).
+    State evolution: multiply shape/rate by phi after each match
+    (preserves mean, inflates variance -> tracks time-varying form).
     """
 
     # ── Hyperparameters ──────────────────────────────────────────────
@@ -2004,7 +2004,7 @@ def _(
               </div>
               
               <div style="margin-top:16px;font-size:0.8rem;color:#8B949E">
-                <p><strong>Legend:</strong> ↗️ = Improving, ↘️ = Declining, → = Stable</p>
+                <p><strong>Legend:</strong> UP = Improving, DOWN = Declining, STABLE = No significant change</p>
                 <p><strong>Projections:</strong> Bayesian forecasts with confidence intervals based on 2000-2025 historical performance</p>
                 <p><strong>Trends:</strong> Calculated using linear regression on historical data</p>
               </div>
@@ -2035,10 +2035,10 @@ def _(BG, CARD, COLORS, MUTED, TEXT, base64, historical_data, io, matplotlib,
         trend = team_data["trends"]
         
         # Trend indicators
-        pos_trend = "↗️" if trend["position_trend"] < -0.1 else "↘️" if trend["position_trend"] > 0.1 else "→"
-        pts_trend = "↗️" if trend["points_trend"] > 0.1 else "↘️" if trend["points_trend"] < -0.1 else "→"
-        atk_trend = "↗️" if trend["attack_trend"] > 0.01 else "↘️" if trend["attack_trend"] < -0.01 else "→"
-        def_trend = "↗️" if trend["defense_trend"] < -0.01 else "↘️" if trend["defense_trend"] > 0.01 else "→"
+        pos_trend = "UP" if trend["position_trend"] < -0.1 else "DOWN" if trend["position_trend"] > 0.1 else "STABLE"
+        pts_trend = "UP" if trend["points_trend"] > 0.1 else "DOWN" if trend["points_trend"] < -0.1 else "STABLE"
+        atk_trend = "UP" if trend["attack_trend"] > 0.01 else "DOWN" if trend["attack_trend"] < -0.01 else "STABLE"
+        def_trend = "UP" if trend["defense_trend"] < -0.01 else "DOWN" if trend["defense_trend"] > 0.01 else "STABLE"
         
         # Future projections
         proj_2025 = next((p for p in team_data["projections"] if p["season"] == 2025), None)
@@ -2094,7 +2094,7 @@ def _(BG, CARD, COLORS, MUTED, TEXT, base64, historical_data, io, matplotlib,
         </div>
         
         <div style="margin-top:16px;font-size:0.8rem;color:#8B949E">
-          <p><strong>Legend:</strong> ↗️ = Improving, ↘️ = Declining, → = Stable</p>
+          <p><strong>Legend:</strong> UP = Improving, DOWN = Declining, STABLE = No significant change</p>
           <p><strong>Projections:</strong> Bayesian forecasts with confidence intervals based on 2000-2025 historical performance</p>
           <p><strong>Trends:</strong> Calculated using linear regression on historical data</p>
         </div>
