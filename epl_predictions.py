@@ -1653,9 +1653,9 @@ def _(
         </div>
 
         <details style="margin-top:8px">
-          <summary>📖 Model details & caveats</summary>
+          <summary>📖 Model details &amp; caveats</summary>
           <div class="card" style="margin-top:10px;font-size:0.83rem;color:#8B949E;line-height:1.8">
-            <p><b style="color:#E6EDF3">Bayesian State-Space Model</b> (Ridall, Titman & Pettitt, 2024 — JRSS Series C).</p>
+            <p><b style="color:#E6EDF3">Bayesian State-Space Model</b> (Ridall, Titman &amp; Pettitt, 2024 — JRSS Series C).</p>
             <p>The model tracks each team's latent <em>attack strength α</em> and <em>defence weakness δ</em>
             as Gamma distributions updated sequentially after every match via the conjugate Gamma-Poisson relationship.
             Home advantage η ≈ 0.26 (≈ 1.30× goal multiplier) is held fixed.</p>
@@ -1674,7 +1674,6 @@ def _(
     return
 
 
-if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+# ── Render.com deployment ────────────────────────────────────────────────────
+# Start command: marimo run epl_dashboard.py --host 0.0.0.0 --port $PORT
+# marimo.App has no .run() method — use the CLI to serve the app.
