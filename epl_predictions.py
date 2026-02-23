@@ -538,208 +538,201 @@ def _(all_matches, current_table, np, PREDICTIONS, T6_BON, EX_BON):
     N_SIM_SEASON = 5000    # MC simulations for season completion
 
     # ── Identify all teams ──────────────────────────────────────────
-    ssm_teams = sorted({t["name"] for t in current_table})
+    ssm_teams = sorted({_t["name"] for _t in current_table})
     n_teams   = len(ssm_teams)
-    idx       = {t: i for i, t in enumerate(ssm_teams)}
+    _idx      = {_t: _ii for _ii, _t in enumerate(ssm_teams)}
 
     # ── Initialise Gamma parameters ─────────────────────────────────
-    a = np.full(n_teams, PRIOR_SHAPE)   # attack shape
-    b = np.full(n_teams, PRIOR_RATE)    # attack rate
-    c = np.full(n_teams, PRIOR_SHAPE)   # defence shape
-    d = np.full(n_teams, PRIOR_RATE)    # defence rate
+    _a = np.full(n_teams, PRIOR_SHAPE)   # attack shape
+    _b = np.full(n_teams, PRIOR_RATE)    # attack rate
+    _c = np.full(n_teams, PRIOR_SHAPE)   # defence shape
+    _d = np.full(n_teams, PRIOR_RATE)    # defence rate
 
-    def inv_mean(ci, di):
+    def _inv_mean(_ci, _di):
         """E[1/X] for X ~ Gamma(c, d)"""
-        return di / (ci - 1) if ci > 1 else di / ci
+        return _di / (_ci - 1) if _ci > 1 else _di / _ci
 
-    def ssm_update(hi, ai, hg, ag):
+    def _ssm_update(_hi, _ai, _hg, _ag):
         """Conjugate mean-field update for one match."""
-        # Pre-update means
-        C_H = inv_mean(c[ai], d[ai]) * np.exp(ETA)
-        C_A = inv_mean(c[hi], d[hi])
-        D_A = (a[hi] / b[hi]) * np.exp(ETA)
-        D_H = (a[ai] / b[ai]) / np.exp(ETA)
+        _C_H = _inv_mean(_c[_ai], _d[_ai]) * np.exp(ETA)
+        _C_A = _inv_mean(_c[_hi], _d[_hi])
+        _D_A = (_a[_hi] / _b[_hi]) * np.exp(ETA)
+        _D_H = (_a[_ai] / _b[_ai]) / np.exp(ETA)
 
         # Attack updates
-        a[hi] += hg;  b[hi] += C_H
-        a[ai] += ag;  b[ai] += C_A
+        _a[_hi] += _hg;  _b[_hi] += _C_H
+        _a[_ai] += _ag;  _b[_ai] += _C_A
         # Defence updates
-        c[hi] += ag;  d[hi] += D_A
-        c[ai] += hg;  d[ai] += D_H
+        _c[_hi] += _ag;  _d[_hi] += _D_A
+        _c[_ai] += _hg;  _d[_ai] += _D_H
 
         # Forgetting (applied to involved teams)
-        for i in [hi, ai]:
-            a[i] *= PHI_WITHIN;  b[i] *= PHI_WITHIN
-            c[i] *= PHI_WITHIN;  d[i] *= PHI_WITHIN
+        for _fi in [_hi, _ai]:
+            _a[_fi] *= PHI_WITHIN;  _b[_fi] *= PHI_WITHIN
+            _c[_fi] *= PHI_WITHIN;  _d[_fi] *= PHI_WITHIN
 
     # ── Run filter over all finished 2025-26 matches ─────────────────
-    finished = sorted(
-        [m for m in all_matches if m.get("status") == "FINISHED"],
-        key=lambda m: m.get("utcDate", "")
+    _finished = sorted(
+        [_m for _m in all_matches if _m.get("status") == "FINISHED"],
+        key=lambda _m: _m.get("utcDate", "")
     )
-    for _m in finished:
+    for _m in _finished:
         _hn = _m["homeTeam"]["name"]
         _an = _m["awayTeam"]["name"]
         _hg = _m["score"]["fullTime"].get("home")
         _ag = _m["score"]["fullTime"].get("away")
-        if _hn in idx and _an in idx and _hg is not None and _ag is not None:
-            ssm_update(idx[_hn], idx[_an], int(_hg), int(_ag))
+        if _hn in _idx and _an in _idx and _hg is not None and _ag is not None:
+            _ssm_update(_idx[_hn], _idx[_an], int(_hg), int(_ag))
 
     # ── Remaining fixtures ───────────────────────────────────────────
-    remaining = [
-        m for m in all_matches
-        if m.get("status") in ("SCHEDULED", "TIMED")
-        and m["homeTeam"]["name"] in idx
-        and m["awayTeam"]["name"] in idx
+    _remaining = [
+        _m for _m in all_matches
+        if _m.get("status") in ("SCHEDULED", "TIMED")
+        and _m["homeTeam"]["name"] in _idx
+        and _m["awayTeam"]["name"] in _idx
     ]
-    n_remaining = len(remaining)
+    n_remaining = len(_remaining)
 
     # ── Current points from actual table ────────────────────────────
-    current_pts = {}
-    current_gf  = {}
-    current_gd  = {}
+    _current_pts = {}
+    _current_gf  = {}
+    _current_gd  = {}
     for _t in current_table:
-        current_pts[_t["name"]] = _t["pts"]
-        current_gf[_t["name"]]  = _t["gf"]
-        current_gd[_t["name"]]  = _t["goalDifference"]
+        _current_pts[_t["name"]] = _t["pts"]
+        _current_gf[_t["name"]]  = _t["gf"]
+        _current_gd[_t["name"]]  = _t["goalDifference"]
 
     # ── Attack/defence means for rating table ────────────────────────
     ssm_ratings = {}
-    for team in ssm_teams:
-        i = idx[team]
-        atk = a[i] / b[i]
-        dfc = c[i] / d[i]
-        ssm_ratings[team] = {
-            "atk": round(atk, 3),
-            "def": round(dfc, 3),
-            "net": round(atk / dfc, 3),
-            "atk_sd": round(np.sqrt(a[i] / b[i]**2), 3),
-            "def_sd": round(np.sqrt(c[i] / d[i]**2), 3),
+    for _team in ssm_teams:
+        _i   = _idx[_team]
+        _atk = _a[_i] / _b[_i]
+        _dfc = _c[_i] / _d[_i]
+        ssm_ratings[_team] = {
+            "atk": round(_atk, 3),
+            "def": round(_dfc, 3),
+            "net": round(_atk / _dfc, 3),
+            "atk_sd": round(np.sqrt(_a[_i] / _b[_i]**2), 3),
+            "def_sd": round(np.sqrt(_c[_i] / _d[_i]**2), 3),
         }
 
     # ── Monte Carlo season completion ────────────────────────────────
-    rng = np.random.default_rng(42)
+    _rng = np.random.default_rng(42)
 
-    # Pre-draw Gamma samples for efficiency
-    # Shape: (N_SIM_SEASON, n_teams)
-    atk_samples = rng.gamma(a, 1.0 / b, size=(N_SIM_SEASON, n_teams))
-    def_samples = rng.gamma(c, 1.0 / d, size=(N_SIM_SEASON, n_teams))
-    atk_samples = np.clip(atk_samples, 0.05, 10)
-    def_samples = np.clip(def_samples, 0.05, 10)
+    # Pre-draw Gamma samples — shape: (N_SIM_SEASON, n_teams)
+    _atk_samples = _rng.gamma(_a, 1.0 / _b, size=(N_SIM_SEASON, n_teams))
+    _def_samples = _rng.gamma(_c, 1.0 / _d, size=(N_SIM_SEASON, n_teams))
+    _atk_samples = np.clip(_atk_samples, 0.05, 10)
+    _def_samples = np.clip(_def_samples, 0.05, 10)
 
     # Simulate each remaining fixture across all sims
-    sim_pts  = {t: np.full(N_SIM_SEASON, current_pts.get(t, 0), dtype=float) for t in ssm_teams}
-    sim_gd   = {t: np.full(N_SIM_SEASON, current_gd.get(t, 0),  dtype=float) for t in ssm_teams}
-    sim_gf   = {t: np.full(N_SIM_SEASON, current_gf.get(t, 0),  dtype=float) for t in ssm_teams}
+    _sim_pts = {_t: np.full(N_SIM_SEASON, _current_pts.get(_t, 0), dtype=float) for _t in ssm_teams}
+    _sim_gd  = {_t: np.full(N_SIM_SEASON, _current_gd.get(_t, 0),  dtype=float) for _t in ssm_teams}
+    _sim_gf  = {_t: np.full(N_SIM_SEASON, _current_gf.get(_t, 0),  dtype=float) for _t in ssm_teams}
 
-    for _m in remaining:
-        hn = _m["homeTeam"]["name"]
-        an = _m["awayTeam"]["name"]
-        hi2 = idx[hn]; ai2 = idx[an]
+    for _m in _remaining:
+        _hn2  = _m["homeTeam"]["name"]
+        _an2  = _m["awayTeam"]["name"]
+        _hi2  = _idx[_hn2]
+        _ai2  = _idx[_an2]
 
-        lam_H = atk_samples[:, hi2] / def_samples[:, ai2] * np.exp(ETA)
-        lam_A = atk_samples[:, ai2] / def_samples[:, hi2]
-        lam_H = np.clip(lam_H, 0.05, 10)
-        lam_A = np.clip(lam_A, 0.05, 10)
+        _lam_H = _atk_samples[:, _hi2] / _def_samples[:, _ai2] * np.exp(ETA)
+        _lam_A = _atk_samples[:, _ai2] / _def_samples[:, _hi2]
+        _lam_H = np.clip(_lam_H, 0.05, 10)
+        _lam_A = np.clip(_lam_A, 0.05, 10)
 
-        hg_sim = rng.poisson(lam_H)
-        ag_sim = rng.poisson(lam_A)
+        _hg_sim = _rng.poisson(_lam_H)
+        _ag_sim = _rng.poisson(_lam_A)
 
-        home_win = hg_sim > ag_sim
-        draw     = hg_sim == ag_sim
-        away_win = ag_sim > hg_sim
+        _home_win = _hg_sim > _ag_sim
+        _draw     = _hg_sim == _ag_sim
+        _away_win = _ag_sim > _hg_sim
 
-        sim_pts[hn] += np.where(home_win, 3, np.where(draw, 1, 0))
-        sim_pts[an] += np.where(away_win, 3, np.where(draw, 1, 0))
-        sim_gd[hn]  += (hg_sim - ag_sim).astype(float)
-        sim_gd[an]  += (ag_sim - hg_sim).astype(float)
-        sim_gf[hn]  += hg_sim.astype(float)
-        sim_gf[an]  += ag_sim.astype(float)
+        _sim_pts[_hn2] += np.where(_home_win, 3, np.where(_draw, 1, 0))
+        _sim_pts[_an2] += np.where(_away_win, 3, np.where(_draw, 1, 0))
+        _sim_gd[_hn2]  += (_hg_sim - _ag_sim).astype(float)
+        _sim_gd[_an2]  += (_ag_sim - _hg_sim).astype(float)
+        _sim_gf[_hn2]  += _hg_sim.astype(float)
+        _sim_gf[_an2]  += _ag_sim.astype(float)
 
     # ── Final position distributions from simulations ────────────────
-    # For each sim, rank teams by (pts desc, gd desc, gf desc)
-    team_list = ssm_teams
+    _team_list = ssm_teams
 
-    pts_mat = np.stack([sim_pts[t] for t in team_list], axis=1)   # (N_SIM, 20)
-    gd_mat  = np.stack([sim_gd[t]  for t in team_list], axis=1)
-    gf_mat  = np.stack([sim_gf[t]  for t in team_list], axis=1)
+    _pts_mat  = np.stack([_sim_pts[_t] for _t in _team_list], axis=1)
+    _gd_mat   = np.stack([_sim_gd[_t]  for _t in _team_list], axis=1)
+    _gf_mat   = np.stack([_sim_gf[_t]  for _t in _team_list], axis=1)
 
-    # Rank: higher pts = lower rank number (1 = champion)
-    # Use negative for descending sort
-    sort_key = np.stack([-pts_mat, -gd_mat, -gf_mat], axis=2)  # (N_SIM, 20, 3)
+    _sort_key = np.stack([-_pts_mat, -_gd_mat, -_gf_mat], axis=2)
 
-    # Compute position for each team in each sim
-    # argsort twice gives ranks
-    ranks = np.zeros((N_SIM_SEASON, n_teams), dtype=int)
-    for sim_i in range(N_SIM_SEASON):
-        order = np.lexsort(sort_key[sim_i, :, ::-1].T)[::-1]
-        ranks[sim_i, order] = np.arange(1, n_teams + 1)
+    _ranks = np.zeros((N_SIM_SEASON, n_teams), dtype=int)
+    for _sim_i in range(N_SIM_SEASON):
+        _order = np.lexsort(_sort_key[_sim_i, :, ::-1].T)[::-1]
+        _ranks[_sim_i, _order] = np.arange(1, n_teams + 1)
 
-    # Expected final position and distribution
-    mean_pos  = ranks.mean(axis=0)
-    std_pos   = ranks.std(axis=0)
-    top1_prob = (ranks == 1).mean(axis=0)
-    top4_prob = (ranks <= 4).mean(axis=0)
-    top6_prob = (ranks <= 6).mean(axis=0)
-    rel_prob  = (ranks >= 18).mean(axis=0)
-    mean_pts  = np.array([sim_pts[t].mean() for t in team_list])
+    _mean_pos  = _ranks.mean(axis=0)
+    _std_pos   = _ranks.std(axis=0)
+    _top1_prob = (_ranks == 1).mean(axis=0)
+    _top4_prob = (_ranks <= 4).mean(axis=0)
+    _top6_prob = (_ranks <= 6).mean(axis=0)
+    _rel_prob  = (_ranks >= 18).mean(axis=0)
+    _mean_pts  = np.array([_sim_pts[_t].mean() for _t in _team_list])
 
     # Build predicted final table (sorted by mean_pos)
-    pred_table_order = np.argsort(mean_pos)
+    _pred_table_order = np.argsort(_mean_pos)
     predicted_final_table = []
-    for rank_i, ti in enumerate(pred_table_order):
-        team = team_list[ti]
-        current_pos = next((t["pos"] for t in current_table if t["name"] == team), rank_i + 1)
+    for _rank_i, _ti in enumerate(_pred_table_order):
+        _team = _team_list[_ti]
+        _current_pos = next((_t["pos"] for _t in current_table if _t["name"] == _team), _rank_i + 1)
         predicted_final_table.append({
-            "pred_pos":  rank_i + 1,
-            "curr_pos":  current_pos,
-            "name":      team,
-            "mean_pos":  round(float(mean_pos[ti]), 1),
-            "std_pos":   round(float(std_pos[ti]), 1),
-            "mean_pts":  round(float(mean_pts[ti]), 1),
-            "curr_pts":  current_pts.get(team, 0),
-            "top1_pct":  round(float(top1_prob[ti]) * 100, 1),
-            "top4_pct":  round(float(top4_prob[ti]) * 100, 1),
-            "top6_pct":  round(float(top6_prob[ti]) * 100, 1),
-            "rel_pct":   round(float(rel_prob[ti]) * 100, 1),
+            "pred_pos":  _rank_i + 1,
+            "curr_pos":  _current_pos,
+            "name":      _team,
+            "mean_pos":  round(float(_mean_pos[_ti]), 1),
+            "std_pos":   round(float(_std_pos[_ti]), 1),
+            "mean_pts":  round(float(_mean_pts[_ti]), 1),
+            "curr_pts":  _current_pts.get(_team, 0),
+            "top1_pct":  round(float(_top1_prob[_ti]) * 100, 1),
+            "top4_pct":  round(float(_top4_prob[_ti]) * 100, 1),
+            "top6_pct":  round(float(_top6_prob[_ti]) * 100, 1),
+            "rel_pct":   round(float(_rel_prob[_ti]) * 100, 1),
         })
 
     # ── Predicted final positions dict (for scoring) ─────────────────
-    pred_pos_dict = {row["name"]: row["pred_pos"] for row in predicted_final_table}
+    pred_pos_dict = {_row["name"]: _row["pred_pos"] for _row in predicted_final_table}
 
     # ── Apply scoring formula to predicted final table ───────────────
-    def _fuzzy_ssm(team, pos_dict):
-        if team in pos_dict:
-            return pos_dict[team]
-        tl = team.lower().replace(" fc", "").strip()
-        for k, v in pos_dict.items():
-            kl = k.lower().replace(" fc", "").strip()
-            if tl in kl or kl in tl:
-                return v
-            if len(set(tl.split()) & set(kl.split())) >= 2:
-                return v
+    def _fuzzy_ssm(_team, _pos_dict):
+        if _team in _pos_dict:
+            return _pos_dict[_team]
+        _tl = _team.lower().replace(" fc", "").strip()
+        for _k, _v in _pos_dict.items():
+            _kl = _k.lower().replace(" fc", "").strip()
+            if _tl in _kl or _kl in _tl:
+                return _v
+            if len(set(_tl.split()) & set(_kl.split())) >= 2:
+                return _v
         return None
 
-    def _score_ssm(picks, pos_dict):
-        top6 = {t for t, p in pos_dict.items() if p <= 6}
-        dt = tb = eb = 0
-        bk = []
-        for pr, team in enumerate(picks, 1):
-            ar = _fuzzy_ssm(team, pos_dict)
-            if ar is None:
-                bk.append({"team": team, "pred": pr, "proj": "?", "dist": 0, "in_top6": False, "exact": False})
+    def _score_ssm(_picks, _pos_dict):
+        _top6 = {_t for _t, _pp in _pos_dict.items() if _pp <= 6}
+        _dt = _tb = _eb = 0
+        _bk = []
+        for _pr, _team in enumerate(_picks, 1):
+            _ar = _fuzzy_ssm(_team, _pos_dict)
+            if _ar is None:
+                _bk.append({"team": _team, "pred": _pr, "proj": "?", "dist": 0, "in_top6": False, "exact": False})
                 continue
-            dist  = abs(pr - ar)
-            in_t6 = any(team.lower().replace(" fc","") in t.lower() or t.lower() in team.lower() for t in top6)
-            exact = (pr == ar)
-            dt += dist
-            if in_t6: tb += T6_BON
-            if exact: eb += EX_BON
-            bk.append({"team": team, "pred": pr, "proj": ar, "dist": dist, "in_top6": in_t6, "exact": exact})
-        return {"dist": dt, "top6": tb, "exact": eb, "total": dt + tb + eb, "breakdown": bk}
+            _dist  = abs(_pr - _ar)
+            _in_t6 = any(_team.lower().replace(" fc","") in _t.lower() or _t.lower() in _team.lower() for _t in _top6)
+            _exact = (_pr == _ar)
+            _dt += _dist
+            if _in_t6: _tb += T6_BON
+            if _exact: _eb += EX_BON
+            _bk.append({"team": _team, "pred": _pr, "proj": _ar, "dist": _dist, "in_top6": _in_t6, "exact": _exact})
+        return {"dist": _dt, "top6": _tb, "exact": _eb, "total": _dt + _tb + _eb, "breakdown": _bk}
 
-    projected_scores = {p: _score_ssm(picks, pred_pos_dict) for p, picks in PREDICTIONS.items()}
-    projected_ranked = sorted(projected_scores.items(), key=lambda x: x[1]["total"])
+    projected_scores = {_p: _score_ssm(_picks, pred_pos_dict) for _p, _picks in PREDICTIONS.items()}
+    projected_ranked = sorted(projected_scores.items(), key=lambda _x: _x[1]["total"])
 
     return (
         N_SIM_SEASON, n_remaining, pred_pos_dict, predicted_final_table,
@@ -1500,59 +1493,59 @@ def _(
         )
 
     # ── Projected scores section ─────────────────────────────────────────
-    def _rc_proj(b): return "exact" if b["exact"] else ("top6" if b["in_top6"] else "")
-    def _dc_proj(b):
-        if b["exact"]: return "d-good"
-        return "d-bad" if b["dist"] > 3 else ("d-ok" if b["dist"] > 0 else "d-good")
+    def _rc_proj(_b): return "exact" if _b["exact"] else ("top6" if _b["in_top6"] else "")
+    def _dc_proj(_b):
+        if _b["exact"]: return "d-good"
+        return "d-bad" if _b["dist"] > 3 else ("d-ok" if _b["dist"] > 0 else "d-good")
 
     _proj_lb = ""
-    for i, (p, _) in enumerate(projected_ranked):
-        s = projected_scores[p]; c = COLORS[p]
+    for _i, (_p, _) in enumerate(projected_ranked):
+        _s = projected_scores[_p]; _c = COLORS[_p]
         _proj_lb += f"""
-        <div class="lb-row" style="border-color:{c}55">
-          <span class="lb-medal">{medals_ssm[i]}</span>
-          <span class="lb-name" style="color:{c}">{p}</span>
+        <div class="lb-row" style="border-color:{_c}55">
+          <span class="lb-medal">{medals_ssm[_i]}</span>
+          <span class="lb-name" style="color:{_c}">{_p}</span>
           <span class="lb-detail">
-            <span>📏 dist: <b>+{s['dist']}</b></span>
-            <span>✅ top-6: <b>{s['top6']}</b></span>
-            <span>🎯 exact: <b>{s['exact']}</b></span>
+            <span>📏 dist: <b>+{_s['dist']}</b></span>
+            <span>✅ top-6: <b>{_s['top6']}</b></span>
+            <span>🎯 exact: <b>{_s['exact']}</b></span>
           </span>
-          <span class="lb-pts" style="color:{c}">{s['total']}</span>
+          <span class="lb-pts" style="color:{_c}">{_s['total']}</span>
         </div>"""
 
     _proj_cards = ""
-    for i, (p, _) in enumerate(projected_ranked):
-        c = COLORS[p]; s = projected_scores[p]
-        rows = ""
-        for b in s["breakdown"]:
-            short = b["team"].replace(" FC","").replace(" United","").replace(" City"," C.").replace(" Hotspur","")
-            rows += (f'<tr class="{_rc_proj(b)}"><td style="color:#8B949E">{b["pred"]}</td>'
-                     f'<td>{short}</td><td style="text-align:center">{b["proj"]}</td>'
-                     f'<td style="text-align:center" class="{_dc_proj(b)}">{b["dist"]}</td></tr>')
-        legend = ('<tr><td colspan="4" style="padding-top:10px;font-size:0.7rem;color:#8B949E">'
+    for _i, (_p, _) in enumerate(projected_ranked):
+        _c = COLORS[_p]; _s = projected_scores[_p]
+        _rows = ""
+        for _b in _s["breakdown"]:
+            _short = _b["team"].replace(" FC","").replace(" United","").replace(" City"," C.").replace(" Hotspur","")
+            _rows += (f'<tr class="{_rc_proj(_b)}"><td style="color:#8B949E">{_b["pred"]}</td>'
+                     f'<td>{_short}</td><td style="text-align:center">{_b["proj"]}</td>'
+                     f'<td style="text-align:center" class="{_dc_proj(_b)}">{_b["dist"]}</td></tr>')
+        _legend = ('<tr><td colspan="4" style="padding-top:10px;font-size:0.7rem;color:#8B949E">'
                   '<span style="background:#1a2e1a;padding:2px 8px;border-radius:4px;color:#FFD700;margin-right:8px">🎯 exact (−5)</span>'
                   '<span style="background:#14232b;padding:2px 8px;border-radius:4px;color:#4FC3C3">✅ top-6 (−2)</span></td></tr>')
-        _proj_cards += (f'<div class="card" style="border-color:{c}44">'
-                        f'<div class="section-title" style="color:{c}">{medals_ssm[i]} {p} &nbsp;·&nbsp;'
-                        f'<span style="color:#E6EDF3;font-size:0.85rem">Projected: {s["total"]} pts</span></div>'
+        _proj_cards += (f'<div class="card" style="border-color:{_c}44">'
+                        f'<div class="section-title" style="color:{_c}">{medals_ssm[_i]} {_p} &nbsp;·&nbsp;'
+                        f'<span style="color:#E6EDF3;font-size:0.85rem">Projected: {_s["total"]} pts</span></div>'
                         f'<table class="ptable"><thead><tr><th>#</th><th>Predicted</th>'
                         f'<th style="text-align:center">Proj. Pos</th><th style="text-align:center">Δ</th>'
-                        f'</tr></thead><tbody>{rows}{legend}</tbody></table></div>')
+                        f'</tr></thead><tbody>{_rows}{_legend}</tbody></table></div>')
 
     # ── SSM ratings table ────────────────────────────────────────────────
-    _sorted_ratings = sorted(ssm_ratings.items(), key=lambda x: -x[1]["net"])
+    _sorted_ratings = sorted(ssm_ratings.items(), key=lambda _x: -_x[1]["net"])
     _ratings_rows = ""
-    for ri, (team, rat) in enumerate(_sorted_ratings):
-        _short = team.replace(" FC","").replace(" United","").replace(" Hotspur","")
-        _is_p = _is_pred_team(team)
+    for _ri, (_team, _rat) in enumerate(_sorted_ratings):
+        _short = _team.replace(" FC","").replace(" United","").replace(" Hotspur","")
+        _is_p = _is_pred_team(_team)
         _bold = "font-weight:700;" if _is_p else ""
-        _net_col = ("#22d3ee" if ri < 4 else "#a78bfa" if ri < 8 else "#f87171" if ri >= 16 else "#94a3b8")
+        _net_col = ("#22d3ee" if _ri < 4 else "#a78bfa" if _ri < 8 else "#f87171" if _ri >= 16 else "#94a3b8")
         _ratings_rows += (
-            f'<tr><td style="text-align:center;color:#475569;font-family:monospace">{ri+1}</td>'
+            f'<tr><td style="text-align:center;color:#475569;font-family:monospace">{_ri+1}</td>'
             f'<td style="{_bold}">{_short}</td>'
-            f'<td style="text-align:center;color:#94a3b8;font-family:monospace">{rat["atk"]:.3f}</td>'
-            f'<td style="text-align:center;color:#94a3b8;font-family:monospace">{rat["def"]:.3f}</td>'
-            f'<td style="text-align:center;color:{_net_col};font-family:monospace;font-weight:700">{rat["net"]:.3f}</td>'
+            f'<td style="text-align:center;color:#94a3b8;font-family:monospace">{_rat["atk"]:.3f}</td>'
+            f'<td style="text-align:center;color:#94a3b8;font-family:monospace">{_rat["def"]:.3f}</td>'
+            f'<td style="text-align:center;color:{_net_col};font-family:monospace;font-weight:700">{_rat["net"]:.3f}</td>'
             f'</tr>'
         )
 
