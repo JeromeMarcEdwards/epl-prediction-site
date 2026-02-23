@@ -276,7 +276,7 @@ def _(BASE, COLORS, EX_BON, HEADERS, PREDICTIONS, SEASON, T6_BON,
 
 
 @app.cell(hide_code=True)
-def _(BASE, COLORS, EX_BON, HEADERS, PREDICTIONS_2024, T6_BON,
+def _(BASE, EX_BON, HEADERS, PREDICTIONS_2024, T6_BON,
       datetime, defaultdict, requests):
     errors_2024 = []
 
@@ -393,7 +393,7 @@ def _(BASE, COLORS, EX_BON, HEADERS, PREDICTIONS_2024, T6_BON,
 
 
 @app.cell(hide_code=True)
-def _(BASE, COLORS, EX_BON, HEADERS, PREDICTIONS_2023, T6_BON,
+def _(BASE, EX_BON, HEADERS, PREDICTIONS_2023, T6_BON,
       datetime, defaultdict, requests):
     errors_2023 = []
 
@@ -510,31 +510,8 @@ def _(BASE, COLORS, EX_BON, HEADERS, PREDICTIONS_2023, T6_BON,
 
 
 @app.cell(hide_code=True)
-def _(COLORS, PREDICTIONS, current_matchday, current_table, errors,
-      fetched_at, mo, refresh):
-    _err = f" · ⚠️ {'; '.join(errors)}" if errors else ""
-    _gws = f"Matchday {current_matchday}" if current_matchday != "?" else ""
-    _all_predicted = {t.lower().replace(" fc","").strip()
-                      for picks in PREDICTIONS.values() for t in picks}
-    mo.vstack([
-        mo.Html(f"""
-        <div class="hero">
-          <h1>⚽  Premier League Prediction Challenge  ⚽</h1>
-          <p>Lower score = better &nbsp;·&nbsp; Distance penalty (+) &nbsp;·&nbsp;
-             Top-6 bonus (−2) &nbsp;·&nbsp; Exact pick bonus (−5)</p>
-        </div>
-        <div class="statusbar">
-          <span><span class="live-dot"></span>Live · {fetched_at}{_err}</span>
-          <span>{len(current_table)} clubs &nbsp;·&nbsp; {_gws} &nbsp;·&nbsp; auto-refresh every 10 min</span>
-        </div>
-        """),
-        refresh,
-    ])
-    return
-
-
-@app.cell(hide_code=True)
 def _(COLORS, mo, ranked, results):
+    _err_h = f" · ⚠️ {'; '.join([])}" if False else ""
     _medals = ["🥇", "🥈", "🥉"]
 
     def _lb_row(i, p):
@@ -687,7 +664,7 @@ def _(BG, CARD, COLORS, MUTED, PREDICTIONS, TEXT, base64, current_table, io, mo,
     _ax2.tick_params(colors=MUTED, labelsize=8)
     _ax2.grid(axis="x", color="#30363D", lw=0.6, linestyle="--", alpha=0.6)
     _ax2.set_xlim(0, max(_pts2) + 5 if _pts2 else 10)
-    _leg = [mpatches.Patch(color="#60a5fa", label="Champions League (1–4)"),
+    _leg = [mpatches.Patch(color="#60a5fa", label="Champions League (1-4)"),
             mpatches.Patch(color="#f59e0b", label="Europa League (5)"),
             mpatches.Patch(color="#8b5cf6", label="Conference (6)")]
     _ax2.legend(handles=_leg, loc="lower right", framealpha=0.2,
@@ -903,7 +880,7 @@ def _(BG, CARD, COLORS, MUTED, PREDICTIONS, TEXT, base64,
                 f'<div class="fact-sub">{sub}</div></div>')
 
     _f3c = (_fc("📈 Biggest improvement", _bg2[0],
-                f"−{abs(_bg2[2])} pts on MD{_bg2[1]}", COLORS[_bg2[0]])
+                f"-{abs(_bg2[2])} pts on MD{_bg2[1]}", COLORS[_bg2[0]])
             if _bg2 else _fc("📈 Biggest improvement", "—", "Not enough data yet"))
 
     mo.Html(f"""
@@ -960,125 +937,183 @@ def _(mo):
     return
 
 
+# ─── HELPER: build a season evolution chart as a base64 PNG ───────────────────
 @app.cell(hide_code=True)
-def _(BG, CARD, COLORS, MUTED, TEXT, base64, gw_scores_2023, historical_2023, io, mo, pe, plt):
-    # 2023-2024 score evolution chart
-    _fig, _ax = plt.subplots(figsize=(12, 4), facecolor=BG)
-    _ax.set_facecolor(CARD)
-    for _sp in _ax.spines.values():
-        _sp.set_edgecolor("#30363D")
+def _(BG, CARD, COLORS, MUTED, TEXT, base64, io, pe, plt):
 
-    if historical_2023:
-        _all_s = [s for pts in gw_scores_2023.values() for _, s in pts]
-        _ymax  = max(_all_s) + 1
-        for _p, _pts in gw_scores_2023.items():
-            _w = [w for w, _ in _pts]
-            _s = [s for _, s in _pts]
-            _c = COLORS[_p]
-            _ax.fill_between(_w, _s, _ymax + 2, alpha=0.07, color=_c, zorder=1)
-            _ax.plot(_w, _s, color=_c, lw=2.5, zorder=3, solid_capstyle="round",
-                     marker="o", markersize=4, markerfacecolor=_c, markeredgewidth=0)
-            _ax.plot(_w[-1], _s[-1], "o", ms=10, color=_c, zorder=5,
-                     markeredgecolor=BG, markeredgewidth=2)
-            _ax.text(_w[-1]+0.25, _s[-1], f" {_p}  {_s[-1]}", color=_c,
-                     fontsize=9, fontfamily="monospace", va="center", fontweight="bold",
-                     path_effects=[pe.withStroke(linewidth=2.5, foreground=BG)])
-        _gws = [w for w, _ in historical_2023]
-        _ax.set_xlim(min(_gws)-0.5, max(_gws)+4)
-        _ax.invert_yaxis()
-        _ax.set_xlabel("Matchday", color=MUTED, fontsize=9, fontfamily="monospace")
-        _ax.set_ylabel("Score  (↑ = better)", color=MUTED, fontsize=9, fontfamily="monospace")
-        _ax.text(0.01, 0.03, "↑ better", transform=_ax.transAxes, color=MUTED, fontsize=8, fontfamily="monospace")
-    else:
-        _ax.text(0.5, 0.5, "No finished matches yet this season",
-                 ha="center", va="center", color=MUTED, fontsize=11, transform=_ax.transAxes)
+    def make_evolution_chart(gw_scores_data, historical_data, season_label):
+        fig, ax = plt.subplots(figsize=(12, 4), facecolor=BG)
+        ax.set_facecolor(CARD)
+        for sp in ax.spines.values():
+            sp.set_edgecolor("#30363D")
 
-    _ax.set_title("Prediction Score Evolution by Matchday — 2023/24", color=TEXT, fontsize=11, fontfamily="monospace", pad=12)
-    _ax.tick_params(colors=MUTED)
-    _ax.grid(color="#30363D", lw=0.6, linestyle="--", alpha=0.6, zorder=0)
-    _fig.tight_layout(pad=1.5)
-    _buf = io.BytesIO()
-    _fig.savefig(_buf, format="png", dpi=150, bbox_inches="tight", facecolor=BG)
-    plt.close(_fig); _buf.seek(0)
-    _b64_2023 = base64.b64encode(_buf.read()).decode()
-    
-    chart_2023 = f'<div class="card" style="margin-bottom:20px"><div class="section-title">📈 Score Evolution</div><img class="chart-img" src="data:image/png;base64,{_b64_2023}" /></div>'
-    return chart_2023
+        if historical_data:
+            all_s = [s for pts in gw_scores_data.values() for _, s in pts]
+            ymax  = max(all_s) + 1
+            for p, pts in gw_scores_data.items():
+                w = [ww for ww, _ in pts]
+                s = [ss for _, ss in pts]
+                c = COLORS[p]
+                ax.fill_between(w, s, ymax + 2, alpha=0.07, color=c, zorder=1)
+                ax.plot(w, s, color=c, lw=2.5, zorder=3, solid_capstyle="round",
+                        marker="o", markersize=4, markerfacecolor=c, markeredgewidth=0)
+                ax.plot(w[-1], s[-1], "o", ms=10, color=c, zorder=5,
+                        markeredgecolor=BG, markeredgewidth=2)
+                ax.text(w[-1]+0.25, s[-1], f" {p}  {s[-1]}", color=c,
+                        fontsize=9, fontfamily="monospace", va="center", fontweight="bold",
+                        path_effects=[pe.withStroke(linewidth=2.5, foreground=BG)])
+            gws = [ww for ww, _ in historical_data]
+            ax.set_xlim(min(gws)-0.5, max(gws)+4)
+            ax.invert_yaxis()
+            ax.set_xlabel("Matchday", color=MUTED, fontsize=9, fontfamily="monospace")
+            ax.set_ylabel("Score  (↑ = better)", color=MUTED, fontsize=9, fontfamily="monospace")
+            ax.text(0.01, 0.03, "↑ better", transform=ax.transAxes, color=MUTED, fontsize=8, fontfamily="monospace")
+        else:
+            ax.text(0.5, 0.5, "No data available",
+                    ha="center", va="center", color=MUTED, fontsize=11, transform=ax.transAxes)
+
+        ax.set_title(f"Prediction Score Evolution by Matchday — {season_label}",
+                     color=TEXT, fontsize=11, fontfamily="monospace", pad=12)
+        ax.tick_params(colors=MUTED)
+        ax.grid(color="#30363D", lw=0.6, linestyle="--", alpha=0.6, zorder=0)
+        fig.tight_layout(pad=1.5)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=BG)
+        plt.close(fig); buf.seek(0)
+        return base64.b64encode(buf.read()).decode()
+
+    return (make_evolution_chart,)
 
 
+# ─── HELPER: build leaderboard + breakdown HTML for any season ────────────────
 @app.cell(hide_code=True)
-def _(COLORS, PREDICTIONS_2024, current_matchday_2024, current_table_2024, errors_2024,
-      fetched_at_2024, mo, ranked_2024, results_2024, chart_2024):
-    _err = f" · ⚠️ {'; '.join(errors_2024)}" if errors_2024 else ""
-    _gws = f"Matchday {current_matchday_2024}" if current_matchday_2024 != "?" else "Final"
-    _all_predicted_2024 = {t.lower().replace(" fc","").strip()
-                          for picks in PREDICTIONS_2024.values() for t in picks}
-    
-    _medals = ["🥇", "🥈", "🥉"]
+def _(COLORS):
 
-    def _lb_row_2024(i, p):
-        s = results_2024[p]; c = COLORS[p]
-        return f"""
-        <div class="lb-row" style="border-color:{c}55">
-          <span class="lb-medal">{_medals[i]}</span>
-          <span class="lb-name" style="color:{c}">{p}</span>
-          <span class="lb-detail">
-            <span>📏 dist: <b>+{s['dist']}</b></span>
-            <span>✅ top-6: <b>{s['top6']}</b></span>
-            <span>🎯 exact: <b>{s['exact']}</b></span>
-          </span>
-          <span class="lb-pts" style="color:{c}">{s['total']}</span>
+    def make_season_html(ranked_data, results_data, season_label, matchday_label, fetched, errors_list):
+        medals = ["🥇", "🥈", "🥉"]
+
+        def _rc(b): return "exact" if b["exact"] else ("top6" if b["in_top6"] else "")
+        def _dc(b):
+            if b["exact"]: return "d-good"
+            return "d-bad" if b["dist"] > 3 else ("d-ok" if b["dist"] > 0 else "d-good")
+
+        err_str = f" · ⚠️ {'; '.join(errors_list)}" if errors_list else ""
+
+        # Leaderboard rows
+        lb_rows = ""
+        for i, (p, _) in enumerate(ranked_data):
+            s = results_data[p]; c = COLORS[p]
+            lb_rows += f"""
+            <div class="lb-row" style="border-color:{c}55">
+              <span class="lb-medal">{medals[i]}</span>
+              <span class="lb-name" style="color:{c}">{p}</span>
+              <span class="lb-detail">
+                <span>📏 dist: <b>+{s['dist']}</b></span>
+                <span>✅ top-6: <b>{s['top6']}</b></span>
+                <span>🎯 exact: <b>{s['exact']}</b></span>
+              </span>
+              <span class="lb-pts" style="color:{c}">{s['total']}</span>
+            </div>"""
+
+        # Pick-by-pick breakdown cards
+        pick_cards = ""
+        for i, (p, _) in enumerate(ranked_data):
+            c = COLORS[p]; s = results_data[p]
+            rows = ""
+            for b in s["breakdown"]:
+                short = b["team"].replace(" FC","").replace(" United","").replace(" City"," C.").replace(" Hotspur","")
+                rows += (f'<tr class="{_rc(b)}"><td style="color:#8B949E">{b["pred"]}</td>'
+                         f'<td>{short}</td><td style="text-align:center">{b["actual"]}</td>'
+                         f'<td style="text-align:center" class="{_dc(b)}">{b["dist"]}</td></tr>')
+            legend = ('<tr><td colspan="4" style="padding-top:10px;font-size:0.7rem;color:#8B949E">'
+                      '<span style="background:#1a2e1a;padding:2px 8px;border-radius:4px;color:#FFD700;margin-right:8px">🎯 exact (−5)</span>'
+                      '<span style="background:#14232b;padding:2px 8px;border-radius:4px;color:#4FC3C3">✅ top-6 (−2)</span></td></tr>')
+            pick_cards += (f'<div class="card" style="border-color:{c}44">'
+                           f'<div class="section-title" style="color:{c}">{medals[i]} {p} &nbsp;·&nbsp;'
+                           f'<span style="color:#E6EDF3;font-size:0.85rem">{s["total"]} pts</span></div>'
+                           f'<table class="ptable"><thead><tr><th>#</th><th>Predicted</th>'
+                           f'<th style="text-align:center">Actual</th><th style="text-align:center">Δ</th>'
+                           f'</tr></thead><tbody>{rows}{legend}</tbody></table></div>')
+
+        statusbar = f"""<div class="statusbar">
+          <span>Final Season · {fetched}{err_str}</span>
+          <span>{matchday_label}</span>
         </div>"""
 
-    def _pick_card_2024(i, p):
-        c = COLORS[p]; s = results_2024[p]
-        rows = ""
-        for b in s["breakdown"]:
-            short = b["team"].replace(" FC","").replace(" United","").replace(" City"," C.").replace(" Hotspur","")
-            rows += (f'<tr class="{_rc(b)}"><td style="color:#8B949E">{b["pred"]}</td>'
-                     f'<td>{short}</td><td style="text-align:center">{b["actual"]}</td>'
-                     f'<td style="text-align:center" class="{_dc(b)}">{b["dist"]}</td></tr>')
-        legend = ('<tr><td colspan="4" style="padding-top:10px;font-size:0.7rem;color:#8B949E">'
-                  '<span style="background:#1a2e1a;padding:2px 8px;border-radius:4px;color:#FFD700;margin-right:8px">🎯 exact (−5)</span>'
-                  '<span style="background:#14232b;padding:2px 8px;border-radius:4px;color:#4FC3C3">✅ top-6 (−2)</span></td></tr>')
-        return (f'<div class="card" style="border-color:{c}44">'
-                f'<div class="section-title" style="color:{c}">{_m2[i]} {p} &​nbsp;·&​nbsp;'
-                f'<span style="color:#E6EDF3;font-size:0.85rem">{s["total"]} pts</span></div>'
-                f'<table class="ptable"><thead><tr><th>#</th><th>Predicted</th>'
-                f'<th style="text-align:center">Actual</th><th style="text-align:center">Δ</th>'
-                f'</tr></thead><tbody>{rows}{legend}</tbody></table></div>')
-
-    def _rc(b): return "exact" if b["exact"] else ("top6" if b["in_top6"] else "")
-    def _dc(b):
-        if b["exact"]: return "d-good"
-        return "d-bad" if b["dist"] > 3 else ("d-ok" if b["dist"] > 0 else "d-good")
-
-    _m2 = ["🥇", "🥈", "🥉"]
-    
-    # Generate all sections
-    leaderboard = f"""
-        <div class="card" style="margin-top:12px">
-          <div class="section-title">🏆 Leaderboard — 2024/25 Season</div>
-          {"".join(_lb_row_2024(i, p) for i, (p, _) in enumerate(ranked_2024))}
+        leaderboard = f"""<div class="card">
+          <div class="section-title">🏆 Leaderboard — {season_label}</div>
+          {lb_rows}
         </div>"""
-    
-    breakdown = f"""
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:18px; margin-top:20px">
-          {"".join(_pick_card_2024(i, p) for i, (p, _) in enumerate(ranked_2024))}
+
+        breakdown = f"""<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:20px">
+          {pick_cards}
         </div>"""
+
+        return statusbar, leaderboard, breakdown
+
+    return (make_season_html,)
+
+
+# ─── 2024/25 Season collapsible ───────────────────────────────────────────────
+@app.cell(hide_code=True)
+def _(
+    current_matchday_2024, current_table_2024, errors_2024, fetched_at_2024,
+    gw_scores_2024, historical_2024, make_evolution_chart, make_season_html,
+    mo, ranked_2024, results_2024,
+):
+    _md_label_2024 = f"Matchday {current_matchday_2024}" if current_matchday_2024 != "?" else "Final"
+    _b64_ev_2024 = make_evolution_chart(gw_scores_2024, historical_2024, "2024/25")
+    _statusbar_2024, _lb_2024, _bd_2024 = make_season_html(
+        ranked_2024, results_2024,
+        "2024/25 Season", _md_label_2024,
+        fetched_at_2024, errors_2024,
+    )
 
     mo.Html(f"""
     <details>
-      <summary>🏆 2024/25 Season Complete Analysis</summary>
+      <summary>📅 2024/25 Season — Final Results</summary>
       <div style="margin-top:16px">
-        <div class="statusbar">
-          <span>Final Season · {fetched_at_2024}{_err}</span>
-          <span>{len(current_table_2024)} clubs &​nbsp;·&​nbsp; {_gws}</span>
+        {_statusbar_2024}
+        {_lb_2024}
+        <div class="card">
+          <div class="section-title">📈 Score Evolution</div>
+          <img class="chart-img" src="data:image/png;base64,{_b64_ev_2024}" />
         </div>
-        {leaderboard}
-        {chart_2024}
-        <div class="section-title" style="margin-top:20px">📋 Pick-by-pick Breakdown</div>
-        {breakdown}
+        <div class="section-title">📋 Pick-by-pick Breakdown</div>
+        {_bd_2024}
+      </div>
+    </details>
+    """)
+    return
+
+
+# ─── 2023/24 Season collapsible ───────────────────────────────────────────────
+@app.cell(hide_code=True)
+def _(
+    current_matchday_2023, current_table_2023, errors_2023, fetched_at_2023,
+    gw_scores_2023, historical_2023, make_evolution_chart, make_season_html,
+    mo, ranked_2023, results_2023,
+):
+    _md_label_2023 = f"Matchday {current_matchday_2023}" if current_matchday_2023 != "?" else "Final"
+    _b64_ev_2023 = make_evolution_chart(gw_scores_2023, historical_2023, "2023/24")
+    _statusbar_2023, _lb_2023, _bd_2023 = make_season_html(
+        ranked_2023, results_2023,
+        "2023/24 Season", _md_label_2023,
+        fetched_at_2023, errors_2023,
+    )
+
+    mo.Html(f"""
+    <details>
+      <summary>📅 2023/24 Season — Final Results</summary>
+      <div style="margin-top:16px">
+        {_statusbar_2023}
+        {_lb_2023}
+        <div class="card">
+          <div class="section-title">📈 Score Evolution</div>
+          <img class="chart-img" src="data:image/png;base64,{_b64_ev_2023}" />
+        </div>
+        <div class="section-title">📋 Pick-by-pick Breakdown</div>
+        {_bd_2023}
       </div>
     </details>
     """)
@@ -1086,7 +1121,6 @@ def _(COLORS, PREDICTIONS_2024, current_matchday_2024, current_table_2024, error
 
 
 if __name__ == "__main__":
-    # Render sets the port in the $PORT environment variable
     import os
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
